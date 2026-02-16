@@ -53,6 +53,21 @@ class Indicators:
     minus_di: float = 0.0
     higher_tf_trend: str = "NEUTRAL"
     valid: bool = False         # True if we have enough data
+    # ── Kline-based EMA (reliable, no warmup problem) ──
+    kline_fast_ema: float = 0.0
+    kline_slow_ema: float = 0.0
+    kline_z_score_bps: float = 0.0
+    # ── Momentum strength ──
+    macd_hist_slope: float = 0.0      # rate of change of MACD histogram (3-bar)
+    macd_strengthening: bool = False   # True if histogram growing in signal direction
+    rsi_slope: float = 0.0            # RSI rate of change (oversold→rising = bullish momentum)
+    # ── VWAP deviation ──
+    vwap: float = 0.0
+    vwap_deviation_bps: float = 0.0   # price vs VWAP in bps
+    # ── Price action ──
+    recent_high: float = 0.0          # highest close in last 10 bars
+    recent_low: float = 0.0           # lowest close in last 10 bars
+    price_position_pct: float = 0.5   # where price sits in recent range (0=low, 1=high)
 
 
 @dataclass
@@ -272,6 +287,49 @@ class MarketData:
             highs, lows, closes, self.cfg.adx_period
         )
 
+        # ── Kline-based EMA & Z-Score (reliable, no warmup bug) ──
+        ind.kline_fast_ema = self._compute_ema_single(closes, self.cfg.fast_ema)
+        ind.kline_slow_ema = self._compute_ema_single(closes, self.cfg.slow_ema)
+        if ind.kline_fast_ema > 0:
+            ind.kline_z_score_bps = ((current_price - ind.kline_fast_ema) / ind.kline_fast_ema) * 10_000
+
+        # ── Momentum strength (MACD histogram slope over last 3 bars) ──
+        if len(closes) >= self.cfg.macd_slow + self.cfg.macd_signal + 3:
+            _, _, hist_now, hist_prev = self._compute_macd(
+                closes, self.cfg.macd_fast, self.cfg.macd_slow, self.cfg.macd_signal
+            )
+            _, _, hist_2, _ = self._compute_macd(
+                closes[:-1], self.cfg.macd_fast, self.cfg.macd_slow, self.cfg.macd_signal
+            )
+            ind.macd_hist_slope = hist_now - hist_2  # 2-bar slope
+            # Strengthening = histogram moving further from zero in its direction
+            if hist_now > 0:
+                ind.macd_strengthening = hist_now > hist_prev
+            elif hist_now < 0:
+                ind.macd_strengthening = hist_now < hist_prev
+
+        # ── RSI slope (3-bar) ──
+        if len(closes) >= self.cfg.rsi_period + 4:
+            rsi_now = self._compute_rsi(closes, self.cfg.rsi_period)
+            rsi_prev = self._compute_rsi(closes[:-2], self.cfg.rsi_period)
+            ind.rsi_slope = rsi_now - rsi_prev
+
+        # ── VWAP ──
+        if len(closes) >= 20 and len(volumes) >= 20:
+            ind.vwap = self._compute_vwap(closes, volumes, highs, lows, period=20)
+            if ind.vwap > 0:
+                ind.vwap_deviation_bps = ((current_price - ind.vwap) / ind.vwap) * 10_000
+
+        # ── Price action (recent range) ──
+        lookback = min(10, len(closes))
+        if lookback >= 3:
+            recent_closes = closes[-lookback:]
+            ind.recent_high = max(recent_closes)
+            ind.recent_low = min(recent_closes)
+            price_range = ind.recent_high - ind.recent_low
+            if price_range > 0:
+                ind.price_position_pct = (current_price - ind.recent_low) / price_range
+
         ind.valid = True
         return ind
 
@@ -432,6 +490,23 @@ class MarketData:
         minus_di = (minus_di_smooth / atr * 100) if atr > 0 else 0.0
         return adx, plus_di, minus_di
 
+    @staticmethod
+    def _compute_vwap(
+        closes: list[float], volumes: list[float],
+        highs: list[float], lows: list[float], period: int = 20,
+    ) -> float:
+        """Compute VWAP (typical price * volume / cumulative volume)."""
+        n = min(period, len(closes), len(volumes), len(highs), len(lows))
+        if n < 5:
+            return 0.0
+        cum_pv = 0.0
+        cum_vol = 0.0
+        for i in range(-n, 0):
+            typical = (highs[i] + lows[i] + closes[i]) / 3
+            cum_pv += typical * volumes[i]
+            cum_vol += volumes[i]
+        return cum_pv / cum_vol if cum_vol > 0 else 0.0
+
     # ── Running EMA (per-tick, for z-score) ────────────────────
 
     def update_ema(self, symbol: str, price: float) -> tuple[float, float, float]:
@@ -511,12 +586,24 @@ class MarketData:
                 snap.indicators.higher_tf_trend = higher_ind.trend_direction
             idx += 1
 
-        # Use mid_price for EMA; fallback to mark_price
+        # Use kline-based EMA as primary (reliable, no warmup bug)
+        # Fall back to running EMA only if kline indicators are not valid
+        if snap.indicators.valid and snap.indicators.kline_fast_ema > 0:
+            snap.fast_ema = snap.indicators.kline_fast_ema
+            snap.slow_ema = snap.indicators.kline_slow_ema
+            snap.z_score_bps = snap.indicators.kline_z_score_bps
+        else:
+            # Fallback: running EMA (less reliable, needs warmup)
+            price_for_ema = snap.mid_price if snap.mid_price > 0 else snap.mark_price
+            if price_for_ema > 0:
+                snap.fast_ema, snap.slow_ema, snap.z_score_bps = self.update_ema(
+                    symbol, price_for_ema
+                )
+
+        # Always update running EMA for continuity (used as fallback)
         price_for_ema = snap.mid_price if snap.mid_price > 0 else snap.mark_price
         if price_for_ema > 0:
-            snap.fast_ema, snap.slow_ema, snap.z_score_bps = self.update_ema(
-                symbol, price_for_ema
-            )
+            self.update_ema(symbol, price_for_ema)
 
         # Persist stats
         self.db.insert(

@@ -79,9 +79,9 @@ class TestPaperExecution:
 
         await paper_exec.execute_signal(signal, snap, qty=0.001, current_total_notional=0)
 
-        # Should have 3 orders: entry + SL + TP
+        # Should have 3-4 orders: entry + SL + TP (+ optional partial TP1)
         orders = db.fetch_all("SELECT * FROM orders")
-        assert len(orders) == 3
+        assert len(orders) >= 3
 
         types = {o["order_type"] for o in orders}
         assert "LIMIT" in types

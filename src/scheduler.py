@@ -148,8 +148,12 @@ class Scheduler:
                     tb=traceback.format_exc(),
                 )
 
-            # Sleep until next cycle
-            await asyncio.sleep(self.cfg.scan_interval_minutes * 60)
+            # Adaptive scan: faster when positions are open
+            if self.cfg.use_adaptive_scan and self.portfolio.get_open_positions(self.cfg.paper_mode):
+                interval = self.cfg.scan_interval_active_minutes
+            else:
+                interval = self.cfg.scan_interval_minutes
+            await asyncio.sleep(interval * 60)
 
         # ── Cleanup ─────────────────────────────────────────────
         await self.client.close()
@@ -254,6 +258,7 @@ class Scheduler:
                 qty = self.risk.compute_position_size(
                     price=snap.mid_price,
                     current_total_notional=current_notional,
+                    atr=snap.indicators.atr if snap.indicators.valid else 0.0,
                 )
                 if qty <= 0:
                     log.warning("qty is zero after sizing", extra={"symbol": sig.symbol})
@@ -262,7 +267,7 @@ class Scheduler:
                 # Dynamic leverage by confluence/score (optional)
                 effective_leverage: int | None = self._dynamic_leverage(sig)
 
-                # High-conviction: 5/5 confluence + high weighted score → larger position + higher leverage
+                # High-conviction: 5/5 confluence + high weighted score -> larger position + higher leverage
                 is_high_conviction = (
                     sig.confluence_score >= self.cfg.high_conviction_min_confluence
                     and sig.weighted_score >= self.cfg.high_conviction_min_weighted_score

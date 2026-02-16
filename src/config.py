@@ -119,6 +119,31 @@ class Settings(BaseSettings):
     weight_orderbook: float = 10.0
     weight_breakout: float = 20.0
     weight_volume_spike: float = 5.0
+    weight_vwap: float = 10.0
+    weight_momentum: float = 10.0
+
+    # ── Momentum Quality Filter ──────────────────────────────
+    require_momentum_confirmation: bool = True
+    momentum_bonus_weight: float = 10.0
+
+    # ── Session/Funding Time Awareness ────────────────────────
+    avoid_funding_window: bool = True
+    funding_window_minutes: int = 30
+
+    # ── Correlation Filter ────────────────────────────────────
+    use_correlation_filter: bool = True
+    max_same_direction_positions: int = 3
+
+    # ── Smart Exit ────────────────────────────────────────────
+    use_momentum_exit: bool = True
+    use_time_decay_sl: bool = True
+    time_decay_start_pct: float = 0.5
+    time_decay_sl_reduction_pct: float = 0.5
+
+    # ── Volatility-Adjusted Sizing ────────────────────────────
+    use_volatility_sizing: bool = True
+    target_risk_pct: float = 0.01
+    volatility_sizing_atr_mult: float = 1.5
 
     # ── Selector ───────────────────────────────────────────────
     max_spread_bps: float = 45.0   # 25 cok sikti (425 sembol eleniyordu), 45 = daha fazla tradeable

@@ -1,21 +1,24 @@
-"""Multi-indicator confluence strategy.
+"""Multi-indicator confluence strategy – optimized for maximum profitability.
 
-Signal generation uses 5 independent indicators that each "vote" for LONG, SHORT, or NEUTRAL.
+Signal generation uses 9 independent indicators that each "vote" for LONG, SHORT, or NEUTRAL.
 A trade is only taken when enough indicators agree (confluence).
 
 Indicators:
-  1. EMA Z-Score: Mean-reversion signal based on price deviation from fast EMA
+  1. EMA Z-Score: Mean-reversion signal based on price deviation from fast EMA (kline-based)
   2. RSI: Oversold → LONG, Overbought → SHORT
-  3. MACD: Histogram crossover direction
+  3. MACD: Histogram crossover direction + momentum strength
   4. Bollinger Bands: Price at lower band → LONG, upper band → SHORT
   5. Trend EMA: Price above/below 50-EMA for trend confirmation
+  6. Orderbook Imbalance: Bid-heavy → LONG, ask-heavy → SHORT
+  7. Volume Spike: Trend-aligned volume surge confirmation
+  8. VWAP: Price below VWAP → LONG (undervalued), above → SHORT (mean reversion)
+  9. Momentum: MACD histogram strengthening in signal direction
 
-Confluence scoring:
-  Each indicator votes with its configured weight.
-  Total score >= min_confluence_score → signal accepted.
-
-This avoids false signals from any single indicator and produces
-higher-confidence entries.
+Additional filters:
+  - Funding time avoidance (±30 min around 00/08/16 UTC)
+  - Correlation filter (max same-direction positions)
+  - Momentum quality filter (require momentum confirmation at min confluence)
+  - Signal strength scoring (indicator extremity bonus)
 """
 
 from __future__ import annotations
@@ -74,10 +77,27 @@ class Signal:
     volume_ratio: float = 1.0
     volume_spike: bool = False
     mode: str = ""
+    # ── New fields ──
+    momentum_confirmed: bool = False
+    vwap_deviation_bps: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.ts:
             self.ts = datetime.now(timezone.utc).isoformat()
+
+
+def _is_near_funding_time(now: datetime, window_minutes: int = 30) -> bool:
+    """Check if current time is within ±window_minutes of a funding time (00/08/16 UTC)."""
+    funding_hours = (0, 8, 16)
+    current_minute_of_day = now.hour * 60 + now.minute
+    for fh in funding_hours:
+        funding_minute = fh * 60
+        # Handle wrap-around at midnight
+        diff = abs(current_minute_of_day - funding_minute)
+        diff = min(diff, 1440 - diff)  # 1440 = minutes in a day
+        if diff <= window_minutes:
+            return True
+    return False
 
 
 class Strategy:
@@ -114,6 +134,7 @@ class Strategy:
                 max_positions=max_positions,
                 open_symbols=open_symbols,
                 open_count=open_count_simulated,
+                open_positions=open_positions,
                 risk_state=risk_state,
             )
             if signal:
@@ -123,7 +144,7 @@ class Strategy:
 
         accepted_list = [s for s in signals if s.accepted]
         accepted_count = len(accepted_list)
-        # Red sebep sayilari (neden islem acilmadi - sunucu logunda gorunur)
+        # Reject reason counts for logging
         reject_counts: dict[str, int] = {}
         for s in signals:
             if not s.accepted and getattr(s, "reject_reason", None):
@@ -161,6 +182,7 @@ class Strategy:
         max_positions: int,
         open_symbols: set[str],
         open_count: int,
+        open_positions: list[dict[str, Any]],
         risk_state: str,
     ) -> Signal | None:
         """Evaluate a single snapshot using multi-indicator confluence."""
@@ -209,7 +231,6 @@ class Strategy:
         effective_min_confluence = 2 if require_ema else min_confluence
 
         if not require_ema:
-            # Eski mantik: min_confluence sayisi kadar oy ayni yonde
             if long_score >= min_confluence and long_score > short_score:
                 side = "LONG"
                 confluence_score = long_score
@@ -233,12 +254,22 @@ class Strategy:
         )
         breakout_confirmed = breakout_up or breakout_down
 
-        # Funding contrarian bonus (only when funding is extreme)
+        # Funding contrarian bonus – scale with funding rate magnitude
+        # Higher funding = bigger bonus (funding farming: earn funding payments)
         if self.cfg.funding_contra_bonus > 0 and abs(snap.funding_rate) >= self.cfg.funding_rate_threshold:
+            # Scale bonus: base + extra for very high funding rates
+            funding_magnitude = abs(snap.funding_rate) / self.cfg.funding_rate_threshold
+            scaled_bonus = self.cfg.funding_contra_bonus * min(funding_magnitude, 3.0)
             if side == "SHORT" and snap.funding_rate > 0:
-                weighted_score += self.cfg.funding_contra_bonus
+                weighted_score += scaled_bonus
             elif side == "LONG" and snap.funding_rate < 0:
-                weighted_score += self.cfg.funding_contra_bonus
+                weighted_score += scaled_bonus
+
+        # ── Signal strength bonus: reward indicator extremity ──
+        weighted_score += self._compute_extremity_bonus(indicators, side)
+
+        # Check momentum confirmation
+        momentum_confirmed = self._check_momentum(indicators, side)
 
         signal = Signal(
             symbol=symbol,
@@ -266,6 +297,8 @@ class Strategy:
             volume_ratio=indicators.volume_ratio,
             volume_spike=indicators.volume_spike,
             mode=mode,
+            momentum_confirmed=momentum_confirmed,
+            vwap_deviation_bps=indicators.vwap_deviation_bps,
         )
 
         # ── Rejection checks ───────────────────────────────────
@@ -290,6 +323,24 @@ class Strategy:
             signal.reject_reason = "cooldown"
             self._persist_signal(signal)
             return None
+
+        # ── NEW: Funding time avoidance ──────────────────────
+        if self.cfg.avoid_funding_window and _is_near_funding_time(now, self.cfg.funding_window_minutes):
+            signal.accepted = False
+            signal.reject_reason = "funding_window"
+            self._persist_signal(signal)
+            return None
+
+        # ── NEW: Correlation filter ──────────────────────────
+        if self.cfg.use_correlation_filter:
+            same_dir_count = sum(
+                1 for p in open_positions if p.get("side") == side
+            )
+            if same_dir_count >= self.cfg.max_same_direction_positions:
+                signal.accepted = False
+                signal.reject_reason = "correlation_limit"
+                self._persist_signal(signal)
+                return None
 
         # Spread too wide
         if snap.spread_bps > self.cfg.max_spread_bps:
@@ -375,7 +426,7 @@ class Strategy:
                 self._persist_signal(signal)
                 return None
 
-        # Pullback mode: only trade WITH the trend (LONG in uptrend, SHORT in downtrend) – typically higher WR
+        # Pullback mode: only trade WITH the trend
         if self.cfg.trade_with_trend_only:
             trend = indicators.trend_direction
             if side == "LONG" and trend not in ("UP", "NEUTRAL"):
@@ -396,7 +447,20 @@ class Strategy:
             self._persist_signal(signal)
             return None
 
-        # TIGHT/ULTRA: require minimum weighted score (we keep 4/5 confluence, so we still get trades)
+        # ── NEW: Momentum quality filter ─────────────────────
+        # At minimum confluence, require momentum confirmation to avoid fading entries
+        if (
+            self.cfg.require_momentum_confirmation
+            and confluence_score <= effective_min_confluence
+            and not momentum_confirmed
+            and indicators.valid
+        ):
+            signal.accepted = False
+            signal.reject_reason = "no_momentum"
+            self._persist_signal(signal)
+            return None
+
+        # TIGHT/ULTRA: require minimum weighted score
         if risk_state == "TIGHT":
             min_score = getattr(self.cfg, "risk_tight_min_weighted_score", 55.0)
             if weighted_score < min_score:
@@ -456,7 +520,6 @@ class Strategy:
                 value=rsi, reason=f"RSI={rsi:.1f} >= {cfg.rsi_overbought} (overbought)",
             ))
         elif not getattr(cfg, "rsi_full_vote_only", False):
-            # Middle zone: slight bias only when rsi_full_vote_only is False (noisier, more trades)
             mid_oversold = (cfg.rsi_oversold + 50) / 2
             mid_overbought = (cfg.rsi_overbought + 50) / 2
             if rsi < mid_oversold:
@@ -601,7 +664,76 @@ class Strategy:
                 value=indicators.volume_ratio, reason="volume spike with trend",
             ))
 
+        # 8. VWAP vote (mean-reversion support)
+        vwap_dev = indicators.vwap_deviation_bps
+        if indicators.vwap > 0 and abs(vwap_dev) >= cfg.entry_threshold_bps:
+            if vwap_dev < 0:  # price below VWAP → undervalued → LONG
+                votes.append(IndicatorVote(
+                    name="vwap", side="LONG", weight=cfg.weight_vwap,
+                    value=vwap_dev, reason=f"price {abs(vwap_dev):.0f}bps below VWAP",
+                ))
+            else:  # price above VWAP → overvalued → SHORT
+                votes.append(IndicatorVote(
+                    name="vwap", side="SHORT", weight=cfg.weight_vwap,
+                    value=vwap_dev, reason=f"price {vwap_dev:.0f}bps above VWAP",
+                ))
+
+        # 9. Momentum confirmation vote (MACD histogram strengthening)
+        if indicators.macd_strengthening:
+            if hist > 0:
+                votes.append(IndicatorVote(
+                    name="momentum", side="LONG", weight=cfg.weight_momentum,
+                    value=indicators.macd_hist_slope,
+                    reason="momentum building (bullish)",
+                ))
+            elif hist < 0:
+                votes.append(IndicatorVote(
+                    name="momentum", side="SHORT", weight=cfg.weight_momentum,
+                    value=indicators.macd_hist_slope,
+                    reason="momentum building (bearish)",
+                ))
+
         return votes
+
+    def _check_momentum(self, indicators: Indicators, side: str) -> bool:
+        """Check if MACD momentum is building in the signal direction."""
+        if not indicators.valid:
+            return True  # no data → don't block
+        if not indicators.macd_strengthening:
+            return False
+        # Momentum must align with signal direction
+        if side == "LONG" and indicators.macd_histogram > 0:
+            return True
+        if side == "SHORT" and indicators.macd_histogram < 0:
+            return True
+        # Also accept if histogram just crossed zero in signal direction
+        if side == "LONG" and indicators.macd_histogram_prev <= 0 < indicators.macd_histogram:
+            return True
+        if side == "SHORT" and indicators.macd_histogram_prev >= 0 > indicators.macd_histogram:
+            return True
+        return False
+
+    def _compute_extremity_bonus(self, indicators: Indicators, side: str) -> float:
+        """Bonus weight for extreme indicator values (higher conviction)."""
+        if not indicators.valid:
+            return 0.0
+        bonus = 0.0
+
+        # RSI extremity bonus: RSI < 15 or > 85 gets extra credit
+        rsi = indicators.rsi
+        if side == "LONG" and rsi < 20:
+            bonus += (20 - rsi) * 0.3  # up to 6 pts at RSI=0
+        elif side == "SHORT" and rsi > 80:
+            bonus += (rsi - 80) * 0.3
+
+        # ADX strength bonus: strong trend in signal direction
+        if indicators.adx > self.cfg.adx_strong_threshold:
+            if side == "LONG" and indicators.plus_di > indicators.minus_di:
+                bonus += 3.0
+            elif side == "SHORT" and indicators.minus_di > indicators.plus_di:
+                bonus += 3.0
+
+        return bonus
 
     def _determine_mode(self, indicators: Indicators) -> str:
         """Determine strategy mode based on volatility and trend strength."""
@@ -633,7 +765,7 @@ class Strategy:
         return elapsed_min < self.cfg.cooldown_minutes
 
     def _get_min_confluence(self, risk_state: str) -> int:
-        """How many indicators must agree. TIGHT/ULTRA keep 4/5; quality enforced by weighted_score min."""
+        """How many indicators must agree."""
         return self.cfg.min_confluence_score
 
     def _get_max_positions(self, risk_state: str) -> int:

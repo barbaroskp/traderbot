@@ -454,6 +454,39 @@ class PaperExecution(ExecutionAdapter):
                     new_sl = mark * (1 + trail_bps / 10_000)
                 self._update_sl_order_price(pos, side, new_sl)
 
+            # ── NEW: Time-decay SL tightening ────────────────────
+            if self.cfg.use_time_decay_sl and not exit_reason:
+                opened = datetime.fromisoformat(pos["opened_at"])
+                if opened.tzinfo is None:
+                    opened = opened.replace(tzinfo=timezone.utc)
+                elapsed_min = (now - opened).total_seconds() / 60
+                decay_start = self.cfg.max_hold_minutes * self.cfg.time_decay_start_pct
+                if elapsed_min > decay_start and profit_bps < 0:
+                    # Progressively tighten SL as position ages while in loss
+                    decay_progress = min(1.0, (elapsed_min - decay_start) / (self.cfg.max_hold_minutes - decay_start))
+                    reduction = sl_bps * self.cfg.time_decay_sl_reduction_pct * decay_progress
+                    tightened_sl_bps = max(sl_bps * 0.3, sl_bps - reduction)  # never less than 30% of original
+                    if side == "LONG":
+                        new_sl = entry * (1 - tightened_sl_bps / 10_000)
+                    else:
+                        new_sl = entry * (1 + tightened_sl_bps / 10_000)
+                    self._update_sl_order_price(pos, side, new_sl)
+
+            # ── NEW: Momentum reversal exit ──────────────────────
+            if self.cfg.use_momentum_exit and not exit_reason and profit_bps < 0:
+                try:
+                    snap = await self.market.snapshot_symbol(symbol)
+                    if snap and snap.indicators.valid:
+                        hist = snap.indicators.macd_histogram
+                        prev = snap.indicators.macd_histogram_prev
+                        # MACD crossed zero against position direction while in loss
+                        if side == "LONG" and hist < 0 and prev >= 0:
+                            exit_reason = "MOMENTUM_EXIT"
+                        elif side == "SHORT" and hist > 0 and prev <= 0:
+                            exit_reason = "MOMENTUM_EXIT"
+                except Exception:
+                    pass  # don't block exit check on indicator fetch failure
+
             # ── SL check ────────────────────────────────────────
             sl_order = self.db.fetch_one(
                 "SELECT * FROM orders WHERE client_order_id=? AND status='PENDING'",
@@ -1194,6 +1227,59 @@ class LiveExecution(ExecutionAdapter):
                 else:
                     new_sl = mark * (1 + trail_bps / 10_000)
                 await self._update_live_sl(pos, side, exch_qty, new_sl)
+
+            # Time-decay SL tightening (live)
+            if self.cfg.use_time_decay_sl:
+                opened_td = datetime.fromisoformat(pos["opened_at"])
+                if opened_td.tzinfo is None:
+                    opened_td = opened_td.replace(tzinfo=timezone.utc)
+                elapsed_td = (now - opened_td).total_seconds() / 60
+                decay_start = self.cfg.max_hold_minutes * self.cfg.time_decay_start_pct
+                if elapsed_td > decay_start and profit_bps < 0:
+                    decay_progress = min(1.0, (elapsed_td - decay_start) / (self.cfg.max_hold_minutes - decay_start))
+                    reduction = sl_bps * self.cfg.time_decay_sl_reduction_pct * decay_progress
+                    tightened_sl_bps = max(sl_bps * 0.3, sl_bps - reduction)
+                    if side == "LONG":
+                        new_sl = entry * (1 - tightened_sl_bps / 10_000)
+                    else:
+                        new_sl = entry * (1 + tightened_sl_bps / 10_000)
+                    await self._update_live_sl(pos, side, exch_qty, new_sl)
+
+            # Momentum reversal exit (live)
+            should_momentum_exit = False
+            if self.cfg.use_momentum_exit and profit_bps < 0:
+                try:
+                    snap = await self.market.snapshot_symbol(symbol)
+                    if snap and snap.indicators.valid:
+                        hist = snap.indicators.macd_histogram
+                        prev = snap.indicators.macd_histogram_prev
+                        if side == "LONG" and hist < 0 and prev >= 0:
+                            should_momentum_exit = True
+                        elif side == "SHORT" and hist > 0 and prev <= 0:
+                            should_momentum_exit = True
+                except Exception:
+                    pass
+
+            if should_momentum_exit:
+                try:
+                    close_side = "SELL" if side == "LONG" else "BUY"
+                    await self.client.place_order(
+                        symbol=symbol,
+                        side=close_side,
+                        position_side=side,
+                        order_type="MARKET",
+                        quantity=exch_qty,
+                    )
+                    mark = await self.market.fetch_mark_price(symbol)
+                    pnl = (mark - entry) * exch_qty if side == "LONG" else (entry - mark) * exch_qty
+                    self.db.execute(
+                        "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=? WHERE id=?",
+                        (pnl, now.isoformat(), pos["id"]),
+                    )
+                    closed.append({**pos, "realised_pnl": pnl, "exit_reason": "MOMENTUM_EXIT"})
+                    continue
+                except BingXClientError as exc:
+                    log.error("live: momentum exit failed", extra={"error": str(exc)})
 
             # Timeout check
             opened = datetime.fromisoformat(pos["opened_at"])

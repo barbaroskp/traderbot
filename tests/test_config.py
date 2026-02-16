@@ -13,7 +13,7 @@ class TestConfig:
         assert cfg.paper_mode is True
         assert cfg.allow_live_trading is False
         assert cfg.initial_capital_usdt == 50.0
-        assert cfg.leverage == 1
+        assert cfg.leverage == 2
         assert cfg.margin_mode == MarginMode.ISOLATED
 
     def test_is_live_requires_both_flags(self) -> None:
@@ -51,6 +51,21 @@ class TestConfig:
         cfg = Settings()
         assert cfg.fast_ema == 9
         assert cfg.slow_ema == 21
-        assert cfg.entry_threshold_bps == 25.0
-        assert cfg.tp_bps == 40.0
-        assert cfg.sl_bps == 30.0
+        assert cfg.entry_threshold_bps == 30.0
+        assert cfg.tp_bps == 100.0
+        assert cfg.sl_bps == 50.0
+
+    def test_new_optimization_params(self) -> None:
+        """Test new profitability optimization parameters."""
+        cfg = Settings()
+        assert cfg.weight_vwap == 10.0
+        assert cfg.weight_momentum == 10.0
+        assert cfg.require_momentum_confirmation is True
+        assert cfg.avoid_funding_window is True
+        assert cfg.funding_window_minutes == 30
+        assert cfg.use_correlation_filter is True
+        assert cfg.max_same_direction_positions == 3
+        assert cfg.use_momentum_exit is True
+        assert cfg.use_time_decay_sl is True
+        assert cfg.use_volatility_sizing is True
+        assert cfg.target_risk_pct == 0.01

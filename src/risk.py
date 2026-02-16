@@ -264,16 +264,48 @@ class RiskManager:
         self,
         price: float,
         current_total_notional: float,
+        atr: float = 0.0,
     ) -> float:
         """Compute order quantity in base asset.
 
         Respects per-trade fraction, max notional, and total exposure limits.
         Uses at least min_notional (2 USDT) to ensure orders aren't too small.
+
+        When use_volatility_sizing is enabled and ATR is available, sizes positions
+        inversely proportional to volatility: smaller in high-vol, larger in low-vol.
         """
         max_trade = self.get_max_trade_notional()
         max_total = self.get_max_total_notional()
         remaining = max(0, max_total - current_total_notional)
 
+        # Volatility-adjusted sizing: target a fixed dollar risk per trade
+        if self.cfg.use_volatility_sizing and atr > 0 and price > 0:
+            # risk_amount = balance * target_risk_pct (e.g., 1% of 50 USDT = 0.5 USDT)
+            risk_amount = self._current_balance * self.cfg.target_risk_pct
+            # qty = risk_amount / (ATR * multiplier) → fewer contracts when ATR is high
+            atr_risk = atr * self.cfg.volatility_sizing_atr_mult
+            if atr_risk > 0:
+                vol_qty = risk_amount / atr_risk
+                vol_notional = vol_qty * price
+                # Cap by regular limits
+                vol_notional = min(vol_notional, max_trade, remaining)
+                vol_notional = max(2.0, vol_notional)  # min 2 USDT
+                qty = vol_notional / price
+                log.debug(
+                    "volatility-adjusted sizing",
+                    extra={
+                        "price": price,
+                        "atr": round(atr, 6),
+                        "risk_amount": round(risk_amount, 4),
+                        "vol_notional": round(vol_notional, 4),
+                        "qty": qty,
+                        "balance": self._current_balance,
+                        "risk_state": self._state.value,
+                    },
+                )
+                return qty
+
+        # Fallback: fraction-based sizing
         fraction_notional = self._current_balance * self.cfg.per_trade_fraction
         # Ensure minimum viable notional (at least 2 USDT)
         min_notional = 2.0
