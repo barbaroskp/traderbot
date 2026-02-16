@@ -713,6 +713,60 @@ class LiveExecution(ExecutionAdapter):
         # Use mid price as reference for DB record
         ref_price = snap.mid_price
 
+        # Live slippage guard: avoid entering when book is suddenly too wide
+        try:
+            depth = await self.market.fetch_depth(signal.symbol)
+        except Exception:
+            depth = None
+
+        guard_mid = 0.0
+        expected_fill = 0.0
+        if depth is not None and depth.mid_price > 0:
+            guard_mid = depth.mid_price
+            expected_fill = depth.best_ask if signal.side == "LONG" else depth.best_bid
+        elif snap.mid_price > 0:
+            guard_mid = snap.mid_price
+            expected_fill = snap.best_ask if signal.side == "LONG" else snap.best_bid
+
+        if guard_mid > 0 and expected_fill > 0:
+            entry_slippage_bps = abs((expected_fill - guard_mid) / guard_mid) * 10_000
+            if entry_slippage_bps > self.cfg.live_slippage_guard_bps:
+                log.warning(
+                    "live: slippage guard blocked entry",
+                    extra={
+                        "symbol": signal.symbol,
+                        "side": signal.side,
+                        "mid": guard_mid,
+                        "expected_fill": expected_fill,
+                        "slippage_bps": round(entry_slippage_bps, 2),
+                        "guard_bps": self.cfg.live_slippage_guard_bps,
+                    },
+                )
+                self.db.insert(
+                    "orders",
+                    {
+                        "client_order_id": client_oid,
+                        "ts": now,
+                        "symbol": signal.symbol,
+                        "side": signal.side,
+                        "order_type": "MARKET",
+                        "price": guard_mid,
+                        "qty": qty,
+                        "status": "REJECTED",
+                        "is_paper": 0,
+                        "reduce_only": 0,
+                        "updated_at": now,
+                    },
+                )
+                return OrderResult(
+                    client_order_id=client_oid,
+                    symbol=signal.symbol,
+                    side=signal.side,
+                    status="REJECTED",
+                    error="live_slippage_guard",
+                    is_paper=False,
+                )
+
         # ── Place entry order (MARKET for instant fill) ────────
         try:
             result = await self.client.place_order(

@@ -57,6 +57,7 @@ class Scheduler:
         self.cfg = cfg
         self._running = False
         self._cycle_count = 0
+        self._soft_kill_cycles_left = 0
 
         # ── Wire components ─────────────────────────────────────
         self.db = Storage(cfg.db_path)
@@ -171,6 +172,8 @@ class Scheduler:
 
         if self.cfg.is_live():
             await self._sync_live_balance()
+            if self._cycle_count % max(1, self.cfg.reconcile_interval_cycles) == 0:
+                await self._reconcile_live_state()
 
         # ── 2. Evaluate risk state ──────────────────────────────
         api_stats = self.client.stats
@@ -210,6 +213,8 @@ class Scheduler:
                 },
             )
 
+        soft_kill_active = self._update_soft_kill(api_stats)
+
         # ── 5b. LLM advisor (optional) ───────────────────────────
         self.llm_advisor.reset_cycle()
         summary = self.portfolio.get_summary()
@@ -224,106 +229,118 @@ class Scheduler:
         current_notional = self.portfolio.get_total_notional(is_paper)
         executed = 0
 
-        for sig in signals_sorted:
-            # Find matching snapshot
-            snap = next((s for s in tradeable if s.symbol == sig.symbol), None)
-            if snap is None:
-                log.warning("signal has no matching snapshot", extra={"symbol": sig.symbol})
-                continue
-
-            # Optional: ask LLM before executing
-            advice = await self.llm_advisor.advise(sig, llm_context)
-            if advice.action == "reject":
-                log.info("llm rejected signal", extra={"symbol": sig.symbol, "reason": advice.reason})
-                continue
-
-            qty = self.risk.compute_position_size(
-                price=snap.mid_price,
-                current_total_notional=current_notional,
-            )
-            if qty <= 0:
-                log.warning("qty is zero after sizing", extra={"symbol": sig.symbol})
-                continue
-
-            # Dynamic leverage by confluence/score (optional)
-            effective_leverage: int | None = self._dynamic_leverage(sig)
-
-            # High-conviction: 5/5 confluence + high weighted score → larger position + higher leverage
-            is_high_conviction = (
-                sig.confluence_score >= self.cfg.high_conviction_min_confluence
-                and sig.weighted_score >= self.cfg.high_conviction_min_weighted_score
-            )
-            if is_high_conviction:
-                qty = qty * self.cfg.high_conviction_size_multiplier
-                max_qty_high = self.cfg.max_trade_notional_high_conviction_usdt / snap.mid_price
-                qty = min(qty, max_qty_high)
-                effective_leverage = max(
-                    effective_leverage or 0,
-                    self.cfg.leverage_high_conviction,
-                ) or None
-                log.info(
-                    "high conviction signal: larger size + higher leverage",
-                    extra={
-                        "symbol": sig.symbol,
-                        "confluence": sig.confluence_score,
-                        "weighted_score": round(sig.weighted_score, 1),
-                        "leverage": effective_leverage or self.cfg.leverage,
-                        "size_multiplier": self.cfg.high_conviction_size_multiplier,
-                    },
-                )
-
-            if effective_leverage is not None:
-                effective_leverage = min(effective_leverage, self.cfg.max_leverage_allowed)
-
-            if advice.action == "reduce":
-                qty = qty * 0.5
-                log.info("llm reduced size", extra={"symbol": sig.symbol, "reason": advice.reason})
-
-            log.info(
-                "executing signal",
+        if soft_kill_active:
+            log.warning(
+                "soft kill-switch active: new entries paused",
                 extra={
-                    "symbol": sig.symbol,
-                    "side": sig.side,
-                    "z_bps": round(sig.z_score_bps, 1),
-                    "confluence": sig.confluence_score,
-                    "weighted_score": round(sig.weighted_score, 1),
-                    "rsi": round(sig.rsi, 1),
-                    "macd_hist": round(sig.macd_histogram, 6),
-                    "bb_pct": round(sig.bollinger_pct, 2),
-                    "trend": sig.trend_direction,
-                    "price": snap.mid_price,
-                    "qty": qty,
-                    "notional": round(qty * snap.mid_price, 2),
-                    "leverage": effective_leverage or self.cfg.leverage,
+                    "cycles_left": self._soft_kill_cycles_left,
+                    "risk_state": risk_state.value,
                 },
             )
+        else:
+            for sig in signals_sorted:
+                # Find matching snapshot
+                snap = next((s for s in tradeable if s.symbol == sig.symbol), None)
+                if snap is None:
+                    log.warning("signal has no matching snapshot", extra={"symbol": sig.symbol})
+                    continue
 
-            result = await self.execution.execute_signal(
-                signal=sig,
-                snap=snap,
-                qty=qty,
-                current_total_notional=current_notional,
-                leverage_override=effective_leverage,
-            )
-            if result:
+                # Optional: ask LLM before executing
+                advice = await self.llm_advisor.advise(sig, llm_context)
+                if advice.action == "reject":
+                    log.info("llm rejected signal", extra={"symbol": sig.symbol, "reason": advice.reason})
+                    continue
+
+                qty = self.risk.compute_position_size(
+                    price=snap.mid_price,
+                    current_total_notional=current_notional,
+                )
+                if qty <= 0:
+                    log.warning("qty is zero after sizing", extra={"symbol": sig.symbol})
+                    continue
+
+                # Dynamic leverage by confluence/score (optional)
+                effective_leverage: int | None = self._dynamic_leverage(sig)
+
+                # High-conviction: 5/5 confluence + high weighted score → larger position + higher leverage
+                is_high_conviction = (
+                    sig.confluence_score >= self.cfg.high_conviction_min_confluence
+                    and sig.weighted_score >= self.cfg.high_conviction_min_weighted_score
+                )
+                if is_high_conviction:
+                    qty = qty * self.cfg.high_conviction_size_multiplier
+                    max_qty_high = self.cfg.max_trade_notional_high_conviction_usdt / snap.mid_price
+                    qty = min(qty, max_qty_high)
+                    effective_leverage = max(
+                        effective_leverage or 0,
+                        self.cfg.leverage_high_conviction,
+                    ) or None
+                    log.info(
+                        "high conviction signal: larger size + higher leverage",
+                        extra={
+                            "symbol": sig.symbol,
+                            "confluence": sig.confluence_score,
+                            "weighted_score": round(sig.weighted_score, 1),
+                            "leverage": effective_leverage or self.cfg.leverage,
+                            "size_multiplier": self.cfg.high_conviction_size_multiplier,
+                        },
+                    )
+
+                if effective_leverage is not None:
+                    effective_leverage = min(effective_leverage, self.cfg.max_leverage_allowed)
+
+                if advice.action == "reduce":
+                    qty = qty * 0.5
+                    log.info("llm reduced size", extra={"symbol": sig.symbol, "reason": advice.reason})
+
                 log.info(
-                    "execution result",
+                    "executing signal",
                     extra={
                         "symbol": sig.symbol,
-                        "status": result.status,
-                        "error": result.error,
-                        "filled_qty": result.filled_qty,
+                        "side": sig.side,
+                        "z_bps": round(sig.z_score_bps, 1),
+                        "confluence": sig.confluence_score,
+                        "weighted_score": round(sig.weighted_score, 1),
+                        "rsi": round(sig.rsi, 1),
+                        "macd_hist": round(sig.macd_histogram, 6),
+                        "bb_pct": round(sig.bollinger_pct, 2),
+                        "trend": sig.trend_direction,
+                        "price": snap.mid_price,
+                        "qty": qty,
+                        "notional": round(qty * snap.mid_price, 2),
+                        "leverage": effective_leverage or self.cfg.leverage,
                     },
                 )
-            if result and result.status == "FILLED":
-                executed += 1
-                current_notional += result.avg_fill_price * result.filled_qty
-                self.strategy.set_cooldown(sig.symbol)
+
+                result = await self.execution.execute_signal(
+                    signal=sig,
+                    snap=snap,
+                    qty=qty,
+                    current_total_notional=current_notional,
+                    leverage_override=effective_leverage,
+                )
+                if result:
+                    log.info(
+                        "execution result",
+                        extra={
+                            "symbol": sig.symbol,
+                            "status": result.status,
+                            "error": result.error,
+                            "filled_qty": result.filled_qty,
+                        },
+                    )
+                if result and result.status == "FILLED":
+                    executed += 1
+                    current_notional += result.avg_fill_price * result.filled_qty
+                    self.strategy.set_cooldown(sig.symbol)
 
         # ── 7. Cancel stale orders ──────────────────────────────
         cancelled = await self.execution.cancel_stale_orders(max_age_minutes=30)
 
         # ── 8. Update portfolio ─────────────────────────────────
+        if self._cycle_count % max(1, self.cfg.db_maintenance_interval_cycles) == 0:
+            await self._run_db_maintenance()
+
         self.risk.update_balance(self.portfolio.balance)
         self.portfolio.record_daily_pnl()
 
@@ -437,6 +454,194 @@ class Scheduler:
                         return val
 
         return 0.0
+
+    def _update_soft_kill(self, api_stats: dict[str, Any]) -> bool:
+        """Pause new entries for a few cycles under extreme stress conditions."""
+        if not self.cfg.soft_kill_switch_enabled:
+            return False
+
+        if self._soft_kill_cycles_left > 0:
+            self._soft_kill_cycles_left -= 1
+            return True
+
+        diag = self.risk.get_diagnostics()
+        drawdown = float(diag.get("drawdown_pct", 0.0))
+        balance = float(diag.get("balance", self.portfolio.balance))
+        min_balance = self.cfg.initial_capital_usdt * self.cfg.soft_kill_min_balance_ratio
+
+        triggers: list[str] = []
+        if api_stats.get("api_error_rate", 0.0) >= self.cfg.soft_kill_api_error_rate:
+            triggers.append("api_error_rate")
+        if drawdown >= self.cfg.soft_kill_drawdown_pct:
+            triggers.append("drawdown")
+        if balance <= min_balance:
+            triggers.append("low_balance")
+
+        if not triggers:
+            return False
+
+        self._soft_kill_cycles_left = max(0, self.cfg.soft_kill_cooldown_cycles - 1)
+        log.warning(
+            "soft kill-switch triggered",
+            extra={
+                "triggers": triggers,
+                "cooldown_cycles": self.cfg.soft_kill_cooldown_cycles,
+                "drawdown_pct": drawdown,
+                "balance": round(balance, 4),
+                "api_error_rate": round(api_stats.get("api_error_rate", 0.0), 4),
+            },
+        )
+        self.db.log_risk_state(
+            state="SOFT_KILL",
+            reason=",".join(triggers),
+            consecutive_losses=int(diag.get("consecutive_losses", 0)),
+            drawdown_pct=drawdown,
+            api_error_rate=float(api_stats.get("api_error_rate", 0.0)),
+        )
+        return True
+
+    async def _reconcile_live_state(self) -> None:
+        """Reconcile live exchange positions with local DB open positions."""
+        try:
+            exch_positions = await self.client.get_positions()
+        except Exception as exc:
+            log.warning("live reconcile failed to fetch exchange positions", extra={"error": str(exc)})
+            return
+
+        db_open = self.db.get_open_positions(is_paper=False)
+
+        exch_map: dict[tuple[str, str], dict[str, float]] = {}
+
+        def _detect_side(position: dict[str, Any]) -> str | None:
+            side = str(position.get("positionSide") or "").upper()
+            if side in ("LONG", "SHORT"):
+                return side
+            amt = float(position.get("positionAmt", 0) or 0)
+            if amt > 0:
+                return "LONG"
+            if amt < 0:
+                return "SHORT"
+            return None
+
+        for p in exch_positions:
+            try:
+                qty_raw = float(p.get("positionAmt", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            qty = abs(qty_raw)
+            if qty <= 0:
+                continue
+            symbol = str(p.get("symbol") or "").upper()
+            side = _detect_side(p)
+            if not symbol or side is None:
+                continue
+            entry = float(p.get("avgPrice", 0) or 0)
+            exch_map[(symbol, side)] = {"qty": qty, "entry": entry}
+
+        db_map: dict[tuple[str, str], dict[str, Any]] = {
+            (str(p.get("symbol", "")).upper(), str(p.get("side", "")).upper()): p
+            for p in db_open
+        }
+
+        reconciled_closed = 0
+        reconciled_resized = 0
+        reconciled_created = 0
+
+        # 1) DB open but no exchange position -> close stale DB row
+        for key, pos in db_map.items():
+            exch = exch_map.get(key)
+            if exch is None:
+                symbol = str(pos.get("symbol", ""))
+                side = str(pos.get("side", ""))
+                entry = float(pos.get("entry_price", 0) or 0)
+                qty = float(pos.get("remaining_qty", pos.get("qty", 0)) or 0)
+                mark = await self.market.fetch_mark_price(symbol)
+                if mark <= 0:
+                    mark = entry
+                pnl = (mark - entry) * qty if side == "LONG" else (entry - mark) * qty
+                self.db.execute(
+                    "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=? WHERE id=?",
+                    (pnl, datetime.now(timezone.utc).isoformat(), pos["id"]),
+                )
+                self.portfolio.apply_closed_trades([{**pos, "realised_pnl": pnl}])
+                self.risk.record_trade_result(pnl)
+                reconciled_closed += 1
+                continue
+
+            db_qty = float(pos.get("remaining_qty", pos.get("qty", 0)) or 0)
+            exch_qty = float(exch["qty"])
+            if db_qty > 0 and abs(exch_qty - db_qty) / db_qty > 0.05:
+                self.db.execute(
+                    "UPDATE positions SET qty=?, remaining_qty=?, notional=? WHERE id=?",
+                    (exch_qty, exch_qty, exch_qty * float(pos.get("entry_price", 0) or 0), pos["id"]),
+                )
+                reconciled_resized += 1
+
+        # 2) Exchange position exists but DB row missing -> create placeholder
+        for key, exch in exch_map.items():
+            if key in db_map:
+                continue
+            symbol, side = key
+            entry = float(exch.get("entry", 0) or 0)
+            if entry <= 0:
+                entry = await self.market.fetch_mark_price(symbol)
+            qty = float(exch["qty"])
+            notional = max(entry, 0) * qty
+            now_iso = datetime.now(timezone.utc).isoformat()
+            self.db.insert(
+                "positions",
+                {
+                    "symbol": symbol,
+                    "side": side,
+                    "entry_price": entry,
+                    "qty": qty,
+                    "notional": notional,
+                    "sl_order_id": "",
+                    "tp1_order_id": "",
+                    "tp_order_id": "",
+                    "sl_bps": self.cfg.sl_bps,
+                    "tp_bps": self.cfg.tp_bps,
+                    "original_qty": qty,
+                    "remaining_qty": qty,
+                    "breakeven_triggered": 0,
+                    "partial_tp_filled": 0,
+                    "highest_price": entry,
+                    "lowest_price": entry,
+                    "opened_at": now_iso,
+                    "status": "OPEN",
+                    "is_paper": 0,
+                },
+            )
+            reconciled_created += 1
+
+        if reconciled_closed or reconciled_resized or reconciled_created:
+            log.warning(
+                "live reconcile applied",
+                extra={
+                    "closed": reconciled_closed,
+                    "resized": reconciled_resized,
+                    "created": reconciled_created,
+                },
+            )
+
+    async def _run_db_maintenance(self) -> None:
+        """Prune old runtime rows and compact WAL/DB periodically."""
+        try:
+            deleted = self.db.prune_runtime_data(self.cfg.db_retention_days)
+            do_vacuum = (
+                self._cycle_count % max(1, self.cfg.db_vacuum_interval_cycles) == 0
+            )
+            self.db.checkpoint_and_vacuum(vacuum=do_vacuum)
+            log.info(
+                "db maintenance complete",
+                extra={
+                    "deleted": deleted,
+                    "retention_days": self.cfg.db_retention_days,
+                    "vacuum": do_vacuum,
+                },
+            )
+        except Exception as exc:
+            log.warning("db maintenance failed", extra={"error": str(exc)})
 
     async def get_status(self) -> dict[str, Any]:
         """Get current bot status (for CLI / healthcheck)."""

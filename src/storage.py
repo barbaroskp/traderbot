@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Generator
 
@@ -337,6 +337,30 @@ class Storage:
                 "api_error_rate": api_error_rate,
             },
         )
+
+    def prune_runtime_data(self, retention_days: int) -> dict[str, int]:
+        """Prune high-volume runtime tables older than retention window."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=max(retention_days, 1))).isoformat()
+        deleted: dict[str, int] = {}
+
+        with self.cursor() as cur:
+            for table, ts_col in (
+                ("market_stats", "ts"),
+                ("signals", "ts"),
+                ("errors", "ts"),
+                ("risk_state_log", "ts"),
+            ):
+                cur.execute(f"DELETE FROM {table} WHERE {ts_col} < ?", (cutoff,))
+                deleted[table] = cur.rowcount if cur.rowcount is not None else 0
+
+        return deleted
+
+    def checkpoint_and_vacuum(self, vacuum: bool = False) -> None:
+        """Compact WAL and optionally VACUUM database file."""
+        conn = self._get_conn()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if vacuum:
+            conn.execute("VACUUM")
 
     def close(self) -> None:
         if self._conn:

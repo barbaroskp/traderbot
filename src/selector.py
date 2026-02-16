@@ -75,6 +75,8 @@ class Selector:
         snapshots = await self.market.batch_snapshots(shortlist, fetch_depth=True, concurrency=5)
 
         tradeable: list[SymbolSnapshot] = []
+        non_tradeable: list[SymbolSnapshot] = []
+
         for snap in snapshots:
             if snap.mid_price <= 0:
                 continue
@@ -82,20 +84,57 @@ class Selector:
             # Spread check
             if snap.spread_bps > self.cfg.max_spread_bps:
                 stats.rejected_spread += 1
+                non_tradeable.append(snap)
                 continue
 
             # Depth check (use the smaller side)
             min_depth = min(snap.bid_depth_usdt, snap.ask_depth_usdt)
             if min_depth < self.cfg.min_depth_usdt:
                 stats.rejected_depth += 1
+                non_tradeable.append(snap)
                 continue
 
             # Volatility guard (z_score as proxy)
             if abs(snap.z_score_bps) > self.cfg.vol_guard_bps:
                 stats.rejected_vol += 1
+                non_tradeable.append(snap)
                 continue
 
             tradeable.append(snap)
+
+        # Lenient fallback: keep aggression high when market-wide filters are temporarily too strict
+        if (
+            self.cfg.selector_lenient_enabled
+            and risk_state in ("NORMAL", "TIGHT")
+            and len(tradeable) < self.cfg.selector_lenient_min_tradeable
+            and non_tradeable
+        ):
+            spread_limit = self.cfg.max_spread_bps * self.cfg.selector_lenient_spread_mult
+            depth_limit = self.cfg.min_depth_usdt * self.cfg.selector_lenient_depth_mult
+
+            recovered = 0
+            for snap in non_tradeable:
+                if len(tradeable) >= self.cfg.selector_lenient_min_tradeable:
+                    break
+                if snap.spread_bps > spread_limit:
+                    continue
+                if min(snap.bid_depth_usdt, snap.ask_depth_usdt) < depth_limit:
+                    continue
+                if abs(snap.z_score_bps) > self.cfg.vol_guard_bps:
+                    continue
+                tradeable.append(snap)
+                recovered += 1
+
+            if recovered > 0:
+                log.info(
+                    "selector lenient fallback applied",
+                    extra={
+                        "recovered": recovered,
+                        "tradeable_after": len(tradeable),
+                        "spread_limit": round(spread_limit, 2),
+                        "depth_limit": round(depth_limit, 2),
+                    },
+                )
 
         stats.tradeable = len(tradeable)
         log.info(

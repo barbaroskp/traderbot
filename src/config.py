@@ -158,6 +158,23 @@ class Settings(BaseSettings):
     scan_interval_minutes: int = 3
     universe_refresh_hours: int = 6
 
+    # ── Runtime Safety & Maintenance ───────────────────────────
+    live_slippage_guard_bps: float = 35.0
+    soft_kill_switch_enabled: bool = True
+    soft_kill_api_error_rate: float = 0.85
+    soft_kill_drawdown_pct: float = 35.0
+    soft_kill_min_balance_ratio: float = 0.15
+    soft_kill_cooldown_cycles: int = 2
+    reconcile_interval_cycles: int = 5
+    selector_lenient_enabled: bool = True
+    selector_lenient_spread_mult: float = 1.25
+    selector_lenient_depth_mult: float = 0.75
+    selector_lenient_min_tradeable: int = 8
+
+    db_maintenance_interval_cycles: int = 60
+    db_vacuum_interval_cycles: int = 240
+    db_retention_days: int = 21
+
     # ── Dashboard (systemd) ────────────────────────────────────
     # Service name for "systemctl is-active" (dashboard shows CALISIYOR/DURDU from this)
     systemd_service_name: str = "bingx-agent"
