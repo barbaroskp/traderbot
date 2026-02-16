@@ -98,6 +98,9 @@ class Strategy:
         now = datetime.now(timezone.utc)
         open_symbols = {p["symbol"] for p in open_positions}
         signals: list[Signal] = []
+        # Prevent over-allocation within the same cycle by counting
+        # accepted new signals as pending positions.
+        open_count_simulated = len(open_positions)
 
         # Dynamic threshold based on risk state
         max_positions = self._get_max_positions(risk_state)
@@ -110,12 +113,13 @@ class Strategy:
                 min_confluence=min_confluence,
                 max_positions=max_positions,
                 open_symbols=open_symbols,
-                open_count=len(open_positions),
+                open_count=open_count_simulated,
                 risk_state=risk_state,
             )
             if signal:
                 signals.append(signal)
                 self._persist_signal(signal)
+                open_count_simulated += 1
 
         accepted_list = [s for s in signals if s.accepted]
         accepted_count = len(accepted_list)

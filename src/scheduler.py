@@ -169,6 +169,9 @@ class Scheduler:
         if self.universe.needs_refresh():
             await self._safe_universe_refresh()
 
+        if self.cfg.is_live():
+            await self._sync_live_balance()
+
         # ── 2. Evaluate risk state ──────────────────────────────
         api_stats = self.client.stats
         risk_state = self.risk.evaluate(api_error_rate=api_stats["api_error_rate"])
@@ -364,6 +367,76 @@ class Scheduler:
                 message=str(exc),
                 tb=traceback.format_exc(),
             )
+
+    async def _sync_live_balance(self) -> None:
+        """Sync portfolio/risk balance from exchange in live mode."""
+        try:
+            raw_balance = await self.client.get_balance()
+            balance = self._extract_live_balance(raw_balance)
+            if balance <= 0:
+                log.warning(
+                    "live balance sync skipped: non-positive balance",
+                    extra={"balance": balance},
+                )
+                return
+            self.portfolio.sync_balance(balance)
+            self.risk.update_balance(balance)
+            log.debug("live balance synced", extra={"balance": round(balance, 4)})
+        except Exception as exc:
+            log.warning("live balance sync failed", extra={"error": str(exc)})
+
+    @staticmethod
+    def _extract_live_balance(raw: Any) -> float:
+        """Extract a usable USDT-equity figure from BingX balance response."""
+        priority_keys = (
+            "balance",
+            "equity",
+            "walletBalance",
+            "marginBalance",
+            "accountEquity",
+            "availableBalance",
+            "availableMargin",
+        )
+
+        def _as_float(v: Any) -> float:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+
+        if isinstance(raw, dict):
+            for key in priority_keys:
+                val = _as_float(raw.get(key))
+                if val > 0:
+                    return val
+            nested = raw.get("balance")
+            if isinstance(nested, dict):
+                for key in priority_keys:
+                    val = _as_float(nested.get(key))
+                    if val > 0:
+                        return val
+
+        if isinstance(raw, list):
+            # Prefer explicit USDT row if present
+            for row in raw:
+                if not isinstance(row, dict):
+                    continue
+                asset = str(row.get("asset") or row.get("currency") or "").upper()
+                if asset == "USDT":
+                    for key in priority_keys:
+                        val = _as_float(row.get(key))
+                        if val > 0:
+                            return val
+            # Fallback: first positive balance-like field
+            for row in raw:
+                if not isinstance(row, dict):
+                    continue
+                for key in priority_keys:
+                    val = _as_float(row.get(key))
+                    if val > 0:
+                        return val
+
+        return 0.0
 
     async def get_status(self) -> dict[str, Any]:
         """Get current bot status (for CLI / healthcheck)."""

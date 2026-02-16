@@ -138,12 +138,20 @@ class MarketData:
 
     # ── Price fetchers ─────────────────────────────────────────
 
+    async def fetch_premium_index(self, symbol: str) -> dict[str, Any]:
+        """Fetch premium index payload (mark + funding) once."""
+        try:
+            return await self.client.get_mark_price(symbol)
+        except BingXClientError as exc:
+            log.warning("premium index fetch failed", extra={"symbol": symbol, "error": str(exc)})
+            return {}
+
     async def fetch_mark_price(self, symbol: str) -> float:
         """Fetch current mark price."""
         try:
-            raw = await self.client.get_mark_price(symbol)
+            raw = await self.fetch_premium_index(symbol)
             return float(raw.get("markPrice", 0))
-        except (BingXClientError, ValueError):
+        except ValueError:
             return 0.0
 
     async def fetch_ticker_price(self, symbol: str) -> float:
@@ -157,9 +165,9 @@ class MarketData:
     async def fetch_funding_rate(self, symbol: str) -> float:
         """Fetch current funding rate."""
         try:
-            raw = await self.client.get_mark_price(symbol)
+            raw = await self.fetch_premium_index(symbol)
             return float(raw.get("lastFundingRate", 0))
-        except (BingXClientError, ValueError):
+        except ValueError:
             return 0.0
 
     # ── Kline + Indicators ─────────────────────────────────────
@@ -451,15 +459,15 @@ class MarketData:
         snap = SymbolSnapshot(symbol=symbol)
         snap.ts = datetime.now(timezone.utc).isoformat()
 
-        # Fetch in parallel: depth, mark price, klines, funding (+ higher TF)
+        # Fetch in parallel: depth, premium index (mark + funding), klines (+ optional higher TF)
         tasks: list = []
+        need_higher_tf = self.cfg.use_higher_tf_trend and self.cfg.require_higher_tf_alignment
         if fetch_depth:
             tasks.append(self.fetch_depth(symbol))
-        tasks.append(self.fetch_mark_price(symbol))
+        tasks.append(self.fetch_premium_index(symbol))
         tasks.append(self.fetch_klines(symbol))
-        if self.cfg.use_higher_tf_trend:
+        if need_higher_tf:
             tasks.append(self.fetch_klines_higher_tf(symbol))
-        tasks.append(self.fetch_funding_rate(symbol))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -476,10 +484,17 @@ class MarketData:
                 snap.imbalance_ratio = depth.imbalance_ratio
             idx += 1
 
-        # Mark price
-        mark_result = results[idx]
-        if not isinstance(mark_result, Exception):
-            snap.mark_price = mark_result  # type: ignore[assignment]
+        # Premium index -> mark price + funding
+        premium_result = results[idx]
+        if not isinstance(premium_result, Exception) and isinstance(premium_result, dict):
+            try:
+                snap.mark_price = float(premium_result.get("markPrice", 0))
+            except ValueError:
+                snap.mark_price = 0.0
+            try:
+                snap.funding_rate = float(premium_result.get("lastFundingRate", 0))
+            except ValueError:
+                snap.funding_rate = 0.0
         idx += 1
 
         # Klines → indicators
@@ -488,18 +503,13 @@ class MarketData:
             snap.indicators = self.compute_indicators(kline_result)
         idx += 1
 
-        # Higher TF trend
-        if self.cfg.use_higher_tf_trend:
+        # Higher TF trend (only when actively used in filtering)
+        if need_higher_tf:
             higher_result = results[idx]
             if not isinstance(higher_result, Exception) and isinstance(higher_result, list):
                 higher_ind = self.compute_indicators(higher_result)
                 snap.indicators.higher_tf_trend = higher_ind.trend_direction
             idx += 1
-
-        # Funding rate
-        funding_result = results[idx]
-        if not isinstance(funding_result, Exception):
-            snap.funding_rate = funding_result  # type: ignore[assignment]
 
         # Use mid_price for EMA; fallback to mark_price
         price_for_ema = snap.mid_price if snap.mid_price > 0 else snap.mark_price
