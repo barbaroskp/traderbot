@@ -68,6 +68,9 @@ class Indicators:
     recent_high: float = 0.0          # highest close in last 10 bars
     recent_low: float = 0.0           # lowest close in last 10 bars
     price_position_pct: float = 0.5   # where price sits in recent range (0=low, 1=high)
+    # ── RSI Divergence ──
+    rsi_bullish_divergence: bool = False  # price new low but RSI higher low → reversal LONG
+    rsi_bearish_divergence: bool = False  # price new high but RSI lower high → reversal SHORT
 
 
 @dataclass
@@ -330,6 +333,12 @@ class MarketData:
             if price_range > 0:
                 ind.price_position_pct = (current_price - ind.recent_low) / price_range
 
+        # ── RSI Divergence (lookback 20 bars, compare two swing points) ──
+        if len(closes) >= 40 and ind.rsi > 0:
+            div_result = self._detect_rsi_divergence(closes, self.cfg.rsi_period)
+            ind.rsi_bullish_divergence = div_result[0]
+            ind.rsi_bearish_divergence = div_result[1]
+
         ind.valid = True
         return ind
 
@@ -506,6 +515,51 @@ class MarketData:
             cum_pv += typical * volumes[i]
             cum_vol += volumes[i]
         return cum_pv / cum_vol if cum_vol > 0 else 0.0
+
+    @staticmethod
+    def _detect_rsi_divergence(
+        closes: list[float], rsi_period: int, lookback: int = 20
+    ) -> tuple[bool, bool]:
+        """Detect bullish/bearish RSI divergence.
+
+        Bullish: price makes lower low but RSI makes higher low → reversal up
+        Bearish: price makes higher high but RSI makes lower high → reversal down
+
+        Returns (bullish_divergence, bearish_divergence).
+        """
+        if len(closes) < lookback + rsi_period + 5:
+            return False, False
+
+        # Compute RSI for recent and previous windows
+        recent_closes = closes[-lookback:]
+        prev_closes = closes[-(lookback * 2):-lookback]
+
+        if len(prev_closes) < rsi_period + 1:
+            return False, False
+
+        rsi_recent = MarketData._compute_rsi(closes, rsi_period)
+        rsi_prev = MarketData._compute_rsi(closes[:-lookback], rsi_period)
+
+        price_recent_low = min(recent_closes)
+        price_prev_low = min(prev_closes)
+        price_recent_high = max(recent_closes)
+        price_prev_high = max(prev_closes)
+
+        # Bullish divergence: price lower low + RSI higher low
+        bullish = (
+            price_recent_low < price_prev_low
+            and rsi_recent > rsi_prev
+            and rsi_recent < 45  # RSI should be in lower zone
+        )
+
+        # Bearish divergence: price higher high + RSI lower high
+        bearish = (
+            price_recent_high > price_prev_high
+            and rsi_recent < rsi_prev
+            and rsi_recent > 55  # RSI should be in upper zone
+        )
+
+        return bullish, bearish
 
     # ── Running EMA (per-tick, for z-score) ────────────────────
 

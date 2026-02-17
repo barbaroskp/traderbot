@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS contracts (
     step_size       REAL,
     min_qty         REAL,
     max_leverage    INTEGER,
+    volume_24h      REAL DEFAULT 0,
     updated_at      TEXT NOT NULL
 );
 
@@ -213,10 +214,17 @@ class Storage:
             conn.execute("ALTER TABLE positions ADD COLUMN highest_price REAL")
         if "lowest_price" not in pos_cols:
             conn.execute("ALTER TABLE positions ADD COLUMN lowest_price REAL")
+        if "leverage" not in pos_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN leverage INTEGER DEFAULT 1")
 
         # Orders: TP level
         if "tp_level" not in ord_cols:
             conn.execute("ALTER TABLE orders ADD COLUMN tp_level INTEGER DEFAULT 0")
+
+        # Contracts: volume
+        contract_cols = _cols("contracts")
+        if "volume_24h" not in contract_cols:
+            conn.execute("ALTER TABLE contracts ADD COLUMN volume_24h REAL DEFAULT 0")
 
         # Initialize defaults for existing rows
         conn.execute(

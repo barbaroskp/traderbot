@@ -47,30 +47,37 @@ class RiskState(str, Enum):
 class RiskThresholds:
     """When to escalate / de-escalate risk.
 
-    Designed so the bot does NOT get stuck in TIGHT:
-    - Escalate only when BOTH consec losses AND meaningful drawdown (avoids streak-only lockout)
-    - Higher consec loss counts before TIGHT/ULTRA
-    - Short time-based recovery so we return to NORMAL quickly
+    All values are now loaded from Settings (config.py / .env).
     """
-    # NORMAL → TIGHT: need BOTH consec losses AND at least this drawdown (avoids bad streak with flat PnL)
     consec_losses_tight: int = 8
     drawdown_pct_tight: float = 8.0
-    drawdown_min_for_consec_tight: float = 2.0   # only escalate on consec losses if dd >= this %
+    drawdown_min_for_consec_tight: float = 2.0
     api_error_rate_tight: float = 0.3
-
-    # TIGHT → ULTRA_TIGHT
     consec_losses_ultra: int = 14
     drawdown_pct_ultra: float = 18.0
     drawdown_min_for_consec_ultra: float = 5.0
     api_error_rate_ultra: float = 0.5
-
-    # De-escalation: easy recovery
     consec_wins_recover: int = 2
     stable_cycles_recover: int = 3
+    max_minutes_in_tight: int = 20
+    max_minutes_in_ultra: int = 45
 
-    # Time-based auto-recovery: SHORT so we don't sit in TIGHT forever
-    max_minutes_in_tight: int = 20     # force NORMAL after 20 min
-    max_minutes_in_ultra: int = 45     # force TIGHT after 45 min
+    @classmethod
+    def from_config(cls, cfg: "Settings") -> "RiskThresholds":
+        return cls(
+            consec_losses_tight=cfg.risk_consec_losses_tight,
+            drawdown_pct_tight=cfg.risk_drawdown_pct_tight,
+            drawdown_min_for_consec_tight=cfg.risk_drawdown_min_for_consec_tight,
+            api_error_rate_tight=cfg.risk_api_error_rate_tight,
+            consec_losses_ultra=cfg.risk_consec_losses_ultra,
+            drawdown_pct_ultra=cfg.risk_drawdown_pct_ultra,
+            drawdown_min_for_consec_ultra=cfg.risk_drawdown_min_for_consec_ultra,
+            api_error_rate_ultra=cfg.risk_api_error_rate_ultra,
+            consec_wins_recover=cfg.risk_consec_wins_recover,
+            stable_cycles_recover=cfg.risk_stable_cycles_recover,
+            max_minutes_in_tight=cfg.risk_max_minutes_in_tight,
+            max_minutes_in_ultra=cfg.risk_max_minutes_in_ultra,
+        )
 
 
 class RiskManager:
@@ -86,7 +93,7 @@ class RiskManager:
     def __init__(self, cfg: Settings, db: Storage) -> None:
         self.cfg = cfg
         self.db = db
-        self.thresholds = RiskThresholds()
+        self.thresholds = RiskThresholds.from_config(cfg)
         self._state = RiskState.NORMAL
         self._consecutive_losses = 0
         self._consecutive_wins = 0
@@ -260,6 +267,65 @@ class RiskManager:
             return base * 2          # was 3x, now 2x
         return base
 
+    def _compute_kelly_fraction(self) -> float | None:
+        """Compute Kelly Criterion optimal fraction from recent trade history.
+
+        Kelly formula: f* = (W/L) * p - q  where:
+          p = win probability, q = 1 - p
+          W = average win, L = average loss (absolute)
+          f* = fraction * kelly_fraction (half-Kelly for safety)
+
+        Returns None if insufficient data.
+        """
+        if not self.cfg.use_kelly_sizing:
+            return None
+
+        trades = self.db.fetch_all(
+            "SELECT realised_pnl FROM positions WHERE status='CLOSED' "
+            "ORDER BY closed_at DESC LIMIT 100"
+        )
+        if len(trades) < self.cfg.kelly_min_trades:
+            return None
+
+        wins = [t["realised_pnl"] for t in trades if t["realised_pnl"] > 0]
+        losses = [abs(t["realised_pnl"]) for t in trades if t["realised_pnl"] < 0]
+
+        if not wins or not losses:
+            return None
+
+        p = len(wins) / len(trades)  # win probability
+        q = 1.0 - p
+        avg_win = sum(wins) / len(wins)
+        avg_loss = sum(losses) / len(losses)
+
+        if avg_loss <= 0:
+            return None
+
+        win_loss_ratio = avg_win / avg_loss
+        kelly = (win_loss_ratio * p - q) / win_loss_ratio
+
+        # Apply fractional Kelly (half-Kelly default)
+        kelly *= self.cfg.kelly_fraction
+
+        # Clamp to configured bounds
+        kelly = max(self.cfg.kelly_min_fraction, min(self.cfg.kelly_max_fraction, kelly))
+
+        if kelly <= 0:
+            return self.cfg.kelly_min_fraction
+
+        log.debug(
+            "kelly sizing",
+            extra={
+                "win_rate": round(p, 3),
+                "avg_win": round(avg_win, 4),
+                "avg_loss": round(avg_loss, 4),
+                "raw_kelly": round(kelly / self.cfg.kelly_fraction, 4),
+                "half_kelly": round(kelly, 4),
+                "trades_used": len(trades),
+            },
+        )
+        return kelly
+
     def compute_position_size(
         self,
         price: float,
@@ -268,15 +334,29 @@ class RiskManager:
     ) -> float:
         """Compute order quantity in base asset.
 
-        Respects per-trade fraction, max notional, and total exposure limits.
-        Uses at least min_notional (2 USDT) to ensure orders aren't too small.
-
-        When use_volatility_sizing is enabled and ATR is available, sizes positions
-        inversely proportional to volatility: smaller in high-vol, larger in low-vol.
+        Priority: Kelly → Volatility → Fraction-based sizing.
         """
         max_trade = self.get_max_trade_notional()
         max_total = self.get_max_total_notional()
         remaining = max(0, max_total - current_total_notional)
+
+        # ── Kelly Criterion sizing (highest priority when available) ──
+        kelly_f = self._compute_kelly_fraction()
+        if kelly_f is not None and price > 0:
+            kelly_notional = self._current_balance * kelly_f
+            kelly_notional = min(kelly_notional, max_trade, remaining)
+            kelly_notional = max(2.0, kelly_notional)
+            qty = kelly_notional / price
+            log.debug(
+                "kelly position size",
+                extra={
+                    "kelly_fraction": round(kelly_f, 4),
+                    "notional": round(kelly_notional, 4),
+                    "qty": qty,
+                    "balance": self._current_balance,
+                },
+            )
+            return qty
 
         # Volatility-adjusted sizing: target a fixed dollar risk per trade
         if self.cfg.use_volatility_sizing and atr > 0 and price > 0:

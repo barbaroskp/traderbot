@@ -35,6 +35,15 @@ class Universe:
     def symbols(self) -> list[str]:
         return list(self._contracts.keys())
 
+    @property
+    def symbols_by_volume(self) -> list[str]:
+        """Return symbols sorted by 24h volume (descending). Most liquid first."""
+        return sorted(
+            self._contracts.keys(),
+            key=lambda s: self._contracts[s].get("volume_24h", 0),
+            reverse=True,
+        )
+
     def get_contract(self, symbol: str) -> dict[str, Any] | None:
         return self._contracts.get(symbol)
 
@@ -53,6 +62,18 @@ class Universe:
         if not raw_contracts:
             log.warning("empty contract list from API, keeping cache")
             return self.size
+
+        # Fetch 24h volume for all symbols in a single API call
+        volume_map: dict[str, float] = {}
+        try:
+            tickers = await self.client.get_all_tickers()
+            for t in tickers:
+                sym = t.get("symbol", "")
+                vol = _safe_float(t.get("quoteVolume", t.get("volume", 0)))
+                if sym and vol > 0:
+                    volume_map[sym] = vol
+        except Exception as exc:
+            log.warning("volume fetch failed, continuing without", extra={"error": str(exc)})
 
         now = datetime.now(timezone.utc).isoformat()
         count = 0
@@ -76,6 +97,7 @@ class Universe:
                 "step_size": _safe_float(c.get("stepSize", c.get("quantityPrecision"))),
                 "min_qty": _safe_float(c.get("minQty", c.get("tradeMinQuantity", 0))),
                 "max_leverage": _safe_int(c.get("maxLongLeverage", c.get("maxLeverage", 125))),
+                "volume_24h": volume_map.get(symbol, 0.0),
                 "updated_at": now,
             }
 

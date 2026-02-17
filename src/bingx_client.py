@@ -259,6 +259,16 @@ class BingXClient:
         )
         return data.get("data", {})
 
+    async def get_all_tickers(self) -> list[dict[str, Any]]:
+        """24hr tickers for ALL symbols (single API call)."""
+        data = await self._request(
+            "GET", "/openApi/swap/v2/quote/ticker", params={}, signed=False
+        )
+        result = data.get("data", [])
+        if isinstance(result, dict):
+            return [result]
+        return result if isinstance(result, list) else []
+
     async def get_depth(self, symbol: str, limit: int = 20) -> dict[str, Any]:
         """Order book depth."""
         data = await self._request(

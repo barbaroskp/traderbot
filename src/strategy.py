@@ -693,6 +693,20 @@ class Strategy:
                     reason="momentum building (bearish)",
                 ))
 
+        # 10. RSI Divergence vote (strong reversal signal)
+        if indicators.rsi_bullish_divergence:
+            votes.append(IndicatorVote(
+                name="rsi_divergence", side="LONG", weight=cfg.weight_rsi * 1.5,
+                value=indicators.rsi,
+                reason="bullish RSI divergence (price lower low, RSI higher low)",
+            ))
+        elif indicators.rsi_bearish_divergence:
+            votes.append(IndicatorVote(
+                name="rsi_divergence", side="SHORT", weight=cfg.weight_rsi * 1.5,
+                value=indicators.rsi,
+                reason="bearish RSI divergence (price higher high, RSI lower high)",
+            ))
+
         return votes
 
     def _check_momentum(self, indicators: Indicators, side: str) -> bool:

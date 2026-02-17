@@ -152,9 +152,10 @@ class Selector:
         return tradeable, stats
 
     def _prefilter(self) -> list[str]:
-        """Stage 1: filter to active contracts with valid metadata."""
+        """Stage 1: filter to active contracts with valid metadata, sorted by 24h volume."""
         result: list[str] = []
-        for symbol in self.universe.symbols:
+        # Use volume-sorted order so shortlist picks most liquid symbols first
+        for symbol in self.universe.symbols_by_volume:
             contract = self.universe.get_contract(symbol)
             if contract is None:
                 continue

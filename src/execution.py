@@ -41,6 +41,34 @@ def _compute_tp_sl_bps(cfg: Settings, snap: SymbolSnapshot, entry_price: float) 
     return cfg.sl_bps, cfg.tp_bps
 
 
+def _estimate_liquidation_price(
+    side: str, entry: float, leverage: int, maintenance_margin_pct: float = 0.5
+) -> float:
+    """Estimate liquidation price for isolated margin.
+
+    Formula: For LONG  → liq = entry * (1 - (1/leverage) + maintenance_margin_pct/100)
+             For SHORT → liq = entry * (1 + (1/leverage) - maintenance_margin_pct/100)
+    """
+    if leverage <= 0 or entry <= 0:
+        return 0.0
+    margin_ratio = 1.0 / leverage
+    maint = maintenance_margin_pct / 100.0
+    if side == "LONG":
+        return entry * (1.0 - margin_ratio + maint)
+    else:
+        return entry * (1.0 + margin_ratio - maint)
+
+
+def _is_near_liquidation(
+    side: str, mark: float, liq_price: float, safety_margin_pct: float
+) -> bool:
+    """Check if mark price is within safety_margin_pct of liquidation price."""
+    if liq_price <= 0 or mark <= 0:
+        return False
+    distance_pct = abs(mark - liq_price) / mark * 100
+    return distance_pct <= safety_margin_pct
+
+
 def _profit_bps(side: str, entry: float, mark: float) -> float:
     if entry <= 0:
         return 0.0
@@ -190,7 +218,7 @@ class PaperExecution(ExecutionAdapter):
                 "side": signal.side,
                 "price": fill_price,
                 "qty": qty,
-                "fee": notional * 0.0004,  # ~4bps simulated fee
+                "fee": notional * (self.cfg.fee_rate_bps / 10_000),
                 "is_paper": 1,
             },
         )
@@ -312,6 +340,7 @@ class PaperExecution(ExecutionAdapter):
                 "tp_order_id": tp_oid,
                 "sl_bps": sl_bps,
                 "tp_bps": tp_bps,
+                "leverage": leverage_override or self.cfg.leverage,
                 "breakeven_triggered": 0,
                 "partial_tp_filled": 0,
                 "highest_price": fill_price,
@@ -381,6 +410,22 @@ class PaperExecution(ExecutionAdapter):
                 "UPDATE positions SET unrealised_pnl=? WHERE id=?",
                 (unrealised_pnl, pos["id"]),
             )
+
+            # ── Anti-liquidation check ─────────────────────────
+            if self.cfg.anti_liquidation_enabled:
+                leverage = int(pos.get("leverage", self.cfg.leverage) or self.cfg.leverage)
+                liq_price = _estimate_liquidation_price(side, entry, leverage)
+                if liq_price > 0 and _is_near_liquidation(
+                    side, mark, liq_price, self.cfg.liquidation_safety_margin_pct
+                ):
+                    exit_reason = "ANTI_LIQUIDATION"
+                    log.warning(
+                        "anti-liquidation triggered",
+                        extra={
+                            "symbol": symbol, "side": side, "mark": mark,
+                            "liq_price": round(liq_price, 6), "leverage": leverage,
+                        },
+                    )
 
             # Track highs/lows for trailing
             highest = float(pos.get("highest_price") or entry)
@@ -543,7 +588,7 @@ class PaperExecution(ExecutionAdapter):
             pnl = (entry - exit_price) * qty
 
         # Fee on exit
-        fee = exit_price * qty * 0.0004
+        fee = exit_price * qty * (self.cfg.fee_rate_bps / 10_000)
         pnl -= fee
 
         # Update position
@@ -595,7 +640,7 @@ class PaperExecution(ExecutionAdapter):
         else:
             pnl = (entry - exit_price) * qty_to_close
 
-        fee = exit_price * qty_to_close * 0.0004
+        fee = exit_price * qty_to_close * (self.cfg.fee_rate_bps / 10_000)
         pnl -= fee
 
         self.db.execute(
@@ -939,20 +984,64 @@ class LiveExecution(ExecutionAdapter):
                 tp1_qty = 0.0
                 tp2_qty = filled_qty
 
-        # SL (stop-market) – no reduceOnly in hedge mode
+        # SL (stop-market) – with verification loop + fallback market close
         close_position_side = signal.side  # same position side for closing
-        try:
-            await self.client.place_order(
-                symbol=signal.symbol,
-                side=close_side,
-                position_side=close_position_side,
-                order_type="STOP_MARKET",
-                quantity=filled_qty,
-                stop_price=sl_price,
-                client_order_id=sl_oid,
+        sl_placed = False
+        for sl_attempt in range(3):
+            try:
+                await self.client.place_order(
+                    symbol=signal.symbol,
+                    side=close_side,
+                    position_side=close_position_side,
+                    order_type="STOP_MARKET",
+                    quantity=filled_qty,
+                    stop_price=sl_price,
+                    client_order_id=sl_oid,
+                )
+                sl_placed = True
+                break
+            except BingXClientError as exc:
+                log.warning(
+                    "live: SL placement attempt failed",
+                    extra={"attempt": sl_attempt + 1, "error": str(exc)},
+                )
+                if sl_attempt < 2:
+                    await asyncio.sleep(0.5 * (sl_attempt + 1))
+
+        if not sl_placed:
+            # CRITICAL: SL failed after retries → emergency market close
+            log.error(
+                "live: SL placement failed after 3 attempts, emergency closing position",
+                extra={"symbol": signal.symbol, "side": signal.side},
             )
-        except BingXClientError as exc:
-            log.error("live: SL placement failed", extra={"error": str(exc)})
+            try:
+                await self.client.place_order(
+                    symbol=signal.symbol,
+                    side=close_side,
+                    position_side=close_position_side,
+                    order_type="MARKET",
+                    quantity=filled_qty,
+                )
+                # Position closed, return as rejected (no SL protection)
+                pnl_est = 0.0  # roughly break-even since just opened
+                self.db.execute(
+                    "UPDATE orders SET status='CANCELLED', updated_at=? WHERE client_order_id=?",
+                    (now, client_oid),
+                )
+                return OrderResult(
+                    client_order_id=client_oid,
+                    exchange_order_id=exchange_oid,
+                    symbol=signal.symbol,
+                    side=signal.side,
+                    status="REJECTED",
+                    error="sl_placement_failed_emergency_close",
+                    is_paper=False,
+                )
+            except BingXClientError as exc2:
+                log.error(
+                    "live: CRITICAL - emergency close also failed, position UNPROTECTED",
+                    extra={"symbol": signal.symbol, "error": str(exc2)},
+                )
 
         # TP1 (partial) – take-profit market
         if tp1_oid:
@@ -1067,6 +1156,7 @@ class LiveExecution(ExecutionAdapter):
                 "tp_bps": tp_bps,
                 "original_qty": filled_qty,
                 "remaining_qty": filled_qty,
+                "leverage": leverage,
                 "breakeven_triggered": 0,
                 "partial_tp_filled": 0,
                 "highest_price": avg_price,
@@ -1154,6 +1244,36 @@ class LiveExecution(ExecutionAdapter):
             mark = await self.market.fetch_mark_price(symbol)
             if mark <= 0:
                 continue
+
+            # ── Anti-liquidation check (live) ─────────────────
+            if self.cfg.anti_liquidation_enabled:
+                leverage = int(pos.get("leverage", self.cfg.leverage) or self.cfg.leverage)
+                liq_price = _estimate_liquidation_price(side, entry, leverage)
+                if liq_price > 0 and _is_near_liquidation(
+                    side, mark, liq_price, self.cfg.liquidation_safety_margin_pct
+                ):
+                    log.warning(
+                        "live: anti-liquidation emergency close",
+                        extra={
+                            "symbol": symbol, "side": side, "mark": mark,
+                            "liq_price": round(liq_price, 6), "leverage": leverage,
+                        },
+                    )
+                    try:
+                        close_side = "SELL" if side == "LONG" else "BUY"
+                        await self.client.place_order(
+                            symbol=symbol, side=close_side, position_side=side,
+                            order_type="MARKET", quantity=exch_qty,
+                        )
+                        pnl = (mark - entry) * exch_qty if side == "LONG" else (entry - mark) * exch_qty
+                        self.db.execute(
+                            "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=? WHERE id=?",
+                            (pnl, now.isoformat(), pos["id"]),
+                        )
+                        closed.append({**pos, "realised_pnl": pnl, "exit_reason": "ANTI_LIQUIDATION"})
+                        continue
+                    except BingXClientError as exc:
+                        log.error("live: anti-liquidation close failed", extra={"error": str(exc)})
 
             profit_bps = _profit_bps(side, entry, mark)
 

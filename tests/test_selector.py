@@ -18,6 +18,7 @@ def mock_universe() -> MagicMock:
     uni = MagicMock(spec=Universe)
     uni.size = 3
     uni.symbols = ["BTC-USDT", "ETH-USDT", "DOGE-USDT"]
+    uni.symbols_by_volume = ["BTC-USDT", "ETH-USDT", "DOGE-USDT"]
     uni.get_contract.side_effect = lambda s: {
         "BTC-USDT": {"symbol": "BTC-USDT", "tick_size": 0.1, "step_size": 0.001, "quote_asset": "USDT"},
         "ETH-USDT": {"symbol": "ETH-USDT", "tick_size": 0.01, "step_size": 0.01, "quote_asset": "USDT"},
@@ -99,6 +100,7 @@ class TestSelector:
         empty_uni = MagicMock(spec=Universe)
         empty_uni.size = 0
         empty_uni.symbols = []
+        empty_uni.symbols_by_volume = []
         selector = Selector(cfg, empty_uni, mock_market)
         tradeable, stats = await selector.select()
         assert len(tradeable) == 0

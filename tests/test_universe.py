@@ -46,6 +46,10 @@ def mock_client() -> AsyncMock:
             "stepSize": "0.1",
         },
     ]
+    client.get_all_tickers.return_value = [
+        {"symbol": "BTC-USDT", "quoteVolume": "1000000"},
+        {"symbol": "ETH-USDT", "quoteVolume": "500000"},
+    ]
     return client
 
 

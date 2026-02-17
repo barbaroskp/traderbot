@@ -140,6 +140,13 @@ class Settings(BaseSettings):
     time_decay_start_pct: float = 0.4       # aggressive: start tightening earlier (was 0.5)
     time_decay_sl_reduction_pct: float = 0.5
 
+    # ── Kelly Criterion Sizing ──────────────────────────────────
+    use_kelly_sizing: bool = True
+    kelly_fraction: float = 0.5  # half-Kelly (safer than full Kelly)
+    kelly_min_trades: int = 20   # need at least this many closed trades for reliable stats
+    kelly_min_fraction: float = 0.02  # minimum 2% even if Kelly says less
+    kelly_max_fraction: float = 0.12  # cap at 12% even if Kelly says more
+
     # ── Volatility-Adjusted Sizing ────────────────────────────
     use_volatility_sizing: bool = True
     target_risk_pct: float = 0.02           # aggressive: 2% risk per trade (was 1%)
@@ -179,6 +186,25 @@ class Settings(BaseSettings):
     dyn_leverage_tier3_weighted_score: float = 75.0    # aggressive: (was 80)
     dyn_leverage_tier3: int = 15                       # aggressive: 15x (was 10)
 
+    # ── Anti-Liquidation ───────────────────────────────────────
+    anti_liquidation_enabled: bool = True
+    liquidation_safety_margin_pct: float = 25.0  # close if price within 25% of liq price
+    max_leverage_for_price: bool = True  # auto-reduce leverage if liq price too close
+
+    # ── Risk State Thresholds ────────────────────────────────────
+    risk_consec_losses_tight: int = 8
+    risk_drawdown_pct_tight: float = 8.0
+    risk_drawdown_min_for_consec_tight: float = 2.0
+    risk_api_error_rate_tight: float = 0.3
+    risk_consec_losses_ultra: int = 14
+    risk_drawdown_pct_ultra: float = 18.0
+    risk_drawdown_min_for_consec_ultra: float = 5.0
+    risk_api_error_rate_ultra: float = 0.5
+    risk_consec_wins_recover: int = 2
+    risk_stable_cycles_recover: int = 3
+    risk_max_minutes_in_tight: int = 20
+    risk_max_minutes_in_ultra: int = 45
+
     # ── Scheduling ─────────────────────────────────────────────
     scan_interval_minutes: int = 3
     scan_interval_active_minutes: int = 1  # faster scan when positions are open
@@ -212,6 +238,9 @@ class Settings(BaseSettings):
     # ── Logging ────────────────────────────────────────────────
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_file: str = "data/bingx_agent.log"
+
+    # ── Fees ──────────────────────────────────────────────────
+    fee_rate_bps: float = 4.0  # default 4bps; set via FEE_RATE_BPS env var
 
     # ── Paper sim ──────────────────────────────────────────────
     slippage_assumption_bps: float = 3.0
