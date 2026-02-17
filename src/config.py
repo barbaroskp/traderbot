@@ -93,9 +93,19 @@ class Settings(BaseSettings):
     volume_spike_ratio: float = 2.0
 
     # ── Signal Confluence ────────────────────────────────────
-    # When require_ema_in_confluence=True: EMA must vote (LONG/SHORT) + at least 1 other indicator agree
-    require_ema_in_confluence: bool = True   # True = EMA zorunlu, uzerine en az 1 oy daha
-    min_confluence_score: int = 2   # used only when require_ema_in_confluence=False
+    # Legacy switch kept for backward compatibility with existing .env files.
+    # Mode-aware switches below override this when set.
+    require_ema_in_confluence: bool = True
+    # Mode-aware EMA gate:
+    # - None => fallback to require_ema_in_confluence
+    # - True/False => explicit behavior per mode
+    require_ema_in_mean_reversion: bool | None = None
+    require_ema_in_trend_follow: bool | None = None
+    require_ema_in_breakout: bool | None = None
+    min_confluence_score: int = 2
+    # When EMA is not required, demand stronger agreement.
+    min_confluence_no_ema: int = 3
+    min_weighted_score_no_ema: float = 70.0
     risk_tight_min_weighted_score: float = 50.0   # TIGHT: 4/5 ok if score >= this
     risk_ultra_min_weighted_score: float = 62.0   # ULTRA_TIGHT: 4/5 ok if score >= this
     require_trend_not_against: bool = False  # False = trende ters de gir (daha fazla islem)

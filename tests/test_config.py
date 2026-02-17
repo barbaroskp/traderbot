@@ -77,3 +77,9 @@ class TestConfig:
         # Adaptive scan
         assert cfg.use_adaptive_scan is True
         assert cfg.scan_interval_active_minutes == 1
+        # Mode-aware EMA gate
+        assert cfg.require_ema_in_mean_reversion is None
+        assert cfg.require_ema_in_trend_follow is None
+        assert cfg.require_ema_in_breakout is None
+        assert cfg.min_confluence_no_ema == 3
+        assert cfg.min_weighted_score_no_ema == 70.0

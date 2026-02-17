@@ -35,6 +35,7 @@ def _make_snap(
     macd_hist_prev: float = 0.0,
     bb_pct: float = 0.5,
     trend: str = "NEUTRAL",
+    adx: float = 0.0,
     valid_indicators: bool = True,
     macd_strengthening: bool = False,
     vwap: float = 0.0,
@@ -48,6 +49,8 @@ def _make_snap(
         elif macd_hist < 0 and macd_hist < macd_hist_prev:
             macd_strengthening = True
 
+    plus_di = 30.0 if trend == "UP" else 15.0
+    minus_di = 30.0 if trend == "DOWN" else 15.0
     indicators = Indicators(
         rsi=rsi,
         macd_histogram=macd_hist,
@@ -55,6 +58,9 @@ def _make_snap(
         bollinger_pct=bb_pct,
         trend_direction=trend,
         ema_trend=50000,
+        adx=adx,
+        plus_di=plus_di,
+        minus_di=minus_di,
         valid=valid_indicators,
         macd_strengthening=macd_strengthening,
         vwap=vwap,
@@ -231,6 +237,67 @@ class TestMomentumConfirmation:
         )]
         signals = strat.generate_signals(snaps, [])
         assert len(signals) == 1
+
+
+class TestModeAwareEmaGate:
+    def test_mean_reversion_still_requires_ema(self, strategy_cfg, db) -> None:
+        """Default behavior: mean-reversion keeps EMA anchor."""
+        strategy_cfg.require_momentum_confirmation = False
+        strat = Strategy(strategy_cfg, db)
+        snaps = [_make_snap(
+            "BTC-USDT",
+            z=0,  # EMA neutral
+            rsi=25,
+            macd_hist=0.002,
+            macd_hist_prev=0.001,
+            bb_pct=0.1,
+            trend="UP",
+            adx=10,  # keep mode as MEAN_REVERSION
+        )]
+        signals = strat.generate_signals(snaps, [])
+        assert len(signals) == 0
+
+    def test_trend_follow_can_trade_without_ema(self, strategy_cfg, db) -> None:
+        """When configured, TREND_FOLLOW accepts non-EMA confluence if strong enough."""
+        strategy_cfg.require_ema_in_confluence = True
+        strategy_cfg.require_ema_in_trend_follow = False
+        strategy_cfg.min_confluence_no_ema = 3
+        strategy_cfg.min_weighted_score_no_ema = 40
+        strategy_cfg.require_momentum_confirmation = True
+        strat = Strategy(strategy_cfg, db)
+        snaps = [_make_snap(
+            "BTC-USDT",
+            z=0,  # EMA neutral
+            rsi=25,
+            macd_hist=0.002,
+            macd_hist_prev=0.001,
+            bb_pct=0.1,
+            trend="UP",
+            adx=35,  # TREND_FOLLOW mode
+            macd_strengthening=True,
+        )]
+        signals = strat.generate_signals(snaps, [])
+        assert len(signals) == 1
+        assert signals[0].mode == "TREND_FOLLOW"
+        assert signals[0].side == "LONG"
+
+    def test_trend_follow_blocks_without_ema_when_override_true(self, strategy_cfg, db) -> None:
+        strategy_cfg.require_ema_in_confluence = True
+        strategy_cfg.require_ema_in_trend_follow = True
+        strategy_cfg.require_momentum_confirmation = False
+        strat = Strategy(strategy_cfg, db)
+        snaps = [_make_snap(
+            "BTC-USDT",
+            z=0,  # EMA neutral
+            rsi=25,
+            macd_hist=0.002,
+            macd_hist_prev=0.001,
+            bb_pct=0.1,
+            trend="UP",
+            adx=35,
+        )]
+        signals = strat.generate_signals(snaps, [])
+        assert len(signals) == 0
 
 
 class TestFundingWindow:

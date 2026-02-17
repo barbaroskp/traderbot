@@ -199,6 +199,7 @@ class Strategy:
 
         # ── Compute indicator votes ───────────────────────────
         indicators = snap.indicators
+        mode = self._determine_mode(indicators)
         votes = self._compute_votes(snap)
 
         # Count agreeing indicators per side
@@ -209,8 +210,8 @@ class Strategy:
         long_weighted = sum(v.weight for v in long_votes)
         short_weighted = sum(v.weight for v in short_votes)
 
-        # Confluence rule: EMA zorunlu + en az 1 diger oy ayni yonde
-        require_ema = getattr(self.cfg, "require_ema_in_confluence", False)
+        # Confluence rule: mode-aware EMA anchor
+        require_ema = self._require_ema_for_mode(mode)
         ema_vote = next((v for v in votes if v.name == "ema_zscore"), None)
 
         if require_ema:
@@ -228,14 +229,18 @@ class Strategy:
             else:
                 return None
 
-        effective_min_confluence = 2 if require_ema else min_confluence
+        effective_min_confluence = (
+            2
+            if require_ema
+            else max(min_confluence, getattr(self.cfg, "min_confluence_no_ema", 3))
+        )
 
         if not require_ema:
-            if long_score >= min_confluence and long_score > short_score:
+            if long_score >= effective_min_confluence and long_score > short_score:
                 side = "LONG"
                 confluence_score = long_score
                 weighted_score = long_weighted
-            elif short_score >= min_confluence and short_score > long_score:
+            elif short_score >= effective_min_confluence and short_score > long_score:
                 side = "SHORT"
                 confluence_score = short_score
                 weighted_score = short_weighted
@@ -243,7 +248,6 @@ class Strategy:
                 return None
 
         min_depth = min(snap.bid_depth_usdt, snap.ask_depth_usdt)
-        mode = self._determine_mode(indicators)
         breakout_up = (
             indicators.volume_spike
             and indicators.bollinger_pct >= self.cfg.breakout_bb_pct_high
@@ -447,16 +451,29 @@ class Strategy:
             self._persist_signal(signal)
             return None
 
-        # ── NEW: Momentum quality filter ─────────────────────
-        # At minimum confluence, require momentum confirmation to avoid fading entries
+        # EMA-less entries must clear a stronger weighted-score floor.
         if (
-            self.cfg.require_momentum_confirmation
-            and confluence_score <= effective_min_confluence
-            and not momentum_confirmed
-            and indicators.valid
+            not require_ema
+            and weighted_score < self.cfg.min_weighted_score_no_ema
         ):
             signal.accepted = False
-            signal.reject_reason = "no_momentum"
+            signal.reject_reason = (
+                f"no_ema_score_{weighted_score:.0f}<{self.cfg.min_weighted_score_no_ema:.0f}"
+            )
+            self._persist_signal(signal)
+            return None
+
+        # Momentum quality filter:
+        # - EMA mode: enforce at minimum confluence
+        # - EMA-less mode: enforce always
+        if (
+            self.cfg.require_momentum_confirmation
+            and not momentum_confirmed
+            and indicators.valid
+            and ((not require_ema) or (confluence_score <= effective_min_confluence))
+        ):
+            signal.accepted = False
+            signal.reject_reason = "no_momentum_no_ema" if not require_ema else "no_momentum"
             self._persist_signal(signal)
             return None
 
@@ -781,6 +798,17 @@ class Strategy:
     def _get_min_confluence(self, risk_state: str) -> int:
         """How many indicators must agree."""
         return self.cfg.min_confluence_score
+
+    def _require_ema_for_mode(self, mode: str) -> bool:
+        """Resolve EMA requirement with mode-aware overrides and legacy fallback."""
+        legacy = getattr(self.cfg, "require_ema_in_confluence", False)
+        if mode == "TREND_FOLLOW":
+            override = getattr(self.cfg, "require_ema_in_trend_follow", None)
+        elif mode == "BREAKOUT_WATCH":
+            override = getattr(self.cfg, "require_ema_in_breakout", None)
+        else:
+            override = getattr(self.cfg, "require_ema_in_mean_reversion", None)
+        return legacy if override is None else bool(override)
 
     def _get_max_positions(self, risk_state: str) -> int:
         base = self.cfg.max_open_positions
