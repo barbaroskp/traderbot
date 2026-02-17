@@ -339,13 +339,18 @@ class RiskManager:
         max_trade = self.get_max_trade_notional()
         max_total = self.get_max_total_notional()
         remaining = max(0, max_total - current_total_notional)
+        min_notional = 2.0
+
+        # Hard stop: never open new position if exposure budget is exhausted
+        # or below exchange minimum viable notional.
+        if price <= 0 or remaining < min_notional:
+            return 0.0
 
         # ── Kelly Criterion sizing (highest priority when available) ──
         kelly_f = self._compute_kelly_fraction()
-        if kelly_f is not None and price > 0:
-            kelly_notional = self._current_balance * kelly_f
+        if kelly_f is not None:
+            kelly_notional = max(min_notional, self._current_balance * kelly_f)
             kelly_notional = min(kelly_notional, max_trade, remaining)
-            kelly_notional = max(2.0, kelly_notional)
             qty = kelly_notional / price
             log.debug(
                 "kelly position size",
@@ -359,7 +364,7 @@ class RiskManager:
             return qty
 
         # Volatility-adjusted sizing: target a fixed dollar risk per trade
-        if self.cfg.use_volatility_sizing and atr > 0 and price > 0:
+        if self.cfg.use_volatility_sizing and atr > 0:
             # risk_amount = balance * target_risk_pct (e.g., 1% of 50 USDT = 0.5 USDT)
             risk_amount = self._current_balance * self.cfg.target_risk_pct
             # qty = risk_amount / (ATR * multiplier) → fewer contracts when ATR is high
@@ -368,8 +373,8 @@ class RiskManager:
                 vol_qty = risk_amount / atr_risk
                 vol_notional = vol_qty * price
                 # Cap by regular limits
+                vol_notional = max(min_notional, vol_notional)
                 vol_notional = min(vol_notional, max_trade, remaining)
-                vol_notional = max(2.0, vol_notional)  # min 2 USDT
                 qty = vol_notional / price
                 log.debug(
                     "volatility-adjusted sizing",
@@ -387,12 +392,10 @@ class RiskManager:
 
         # Fallback: fraction-based sizing
         fraction_notional = self._current_balance * self.cfg.per_trade_fraction
-        # Ensure minimum viable notional (at least 2 USDT)
-        min_notional = 2.0
         notional = max(min_notional, fraction_notional)
         notional = min(notional, max_trade, remaining)
 
-        if notional <= 0 or price <= 0:
+        if notional < min_notional:
             return 0.0
 
         qty = notional / price

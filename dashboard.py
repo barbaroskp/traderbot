@@ -18,6 +18,7 @@ async def dashboard():
     # Bot ile aynı DB'yi kullan (config / .env'deki DB_PATH)
     conn = sqlite3.connect(cfg.db_path)
     conn.row_factory = sqlite3.Row
+    mode_is_paper = 0 if cfg.is_live() else 1
 
     # ── Balance ────────────────────────────────────────────────
     bal = (await client.get_balance()).get("balance", {})
@@ -36,49 +37,67 @@ async def dashboard():
 
     # ── DB stats ───────────────────────────────────────────────
     total_closed = conn.execute(
-        "SELECT COUNT(*) FROM positions WHERE status='CLOSED'"
+        "SELECT COUNT(*) FROM positions WHERE status='CLOSED' AND is_paper=?",
+        (mode_is_paper,),
     ).fetchone()[0]
     realised_pnl = conn.execute(
-        "SELECT COALESCE(SUM(realised_pnl),0) FROM positions WHERE status='CLOSED'"
+        "SELECT COALESCE(SUM(realised_pnl),0) FROM positions WHERE status='CLOSED' AND is_paper=?",
+        (mode_is_paper,),
     ).fetchone()[0]
     wins = conn.execute(
-        "SELECT COUNT(*) FROM positions WHERE status='CLOSED' AND realised_pnl > 0"
+        "SELECT COUNT(*) FROM positions WHERE status='CLOSED' AND is_paper=? AND realised_pnl > 0",
+        (mode_is_paper,),
     ).fetchone()[0]
     losses = total_closed - wins
 
     # Best / worst trade
     best = conn.execute(
-        "SELECT symbol, side, realised_pnl FROM positions WHERE status='CLOSED' ORDER BY realised_pnl DESC LIMIT 1"
+        "SELECT symbol, side, realised_pnl FROM positions WHERE status='CLOSED' AND is_paper=? "
+        "ORDER BY realised_pnl DESC LIMIT 1",
+        (mode_is_paper,),
     ).fetchone()
     worst = conn.execute(
-        "SELECT symbol, side, realised_pnl FROM positions WHERE status='CLOSED' ORDER BY realised_pnl ASC LIMIT 1"
+        "SELECT symbol, side, realised_pnl FROM positions WHERE status='CLOSED' AND is_paper=? "
+        "ORDER BY realised_pnl ASC LIMIT 1",
+        (mode_is_paper,),
     ).fetchone()
 
     # Avg win / avg loss
     avg_win = conn.execute(
-        "SELECT COALESCE(AVG(realised_pnl),0) FROM positions WHERE status='CLOSED' AND realised_pnl > 0"
+        "SELECT COALESCE(AVG(realised_pnl),0) FROM positions WHERE status='CLOSED' "
+        "AND is_paper=? AND realised_pnl > 0",
+        (mode_is_paper,),
     ).fetchone()[0]
     avg_loss = conn.execute(
-        "SELECT COALESCE(AVG(realised_pnl),0) FROM positions WHERE status='CLOSED' AND realised_pnl <= 0"
+        "SELECT COALESCE(AVG(realised_pnl),0) FROM positions WHERE status='CLOSED' "
+        "AND is_paper=? AND realised_pnl <= 0",
+        (mode_is_paper,),
     ).fetchone()[0]
 
     # Total long / short
     long_count = conn.execute(
-        "SELECT COUNT(*) FROM positions WHERE status='CLOSED' AND side='LONG'"
+        "SELECT COUNT(*) FROM positions WHERE status='CLOSED' AND is_paper=? AND side='LONG'",
+        (mode_is_paper,),
     ).fetchone()[0]
     short_count = conn.execute(
-        "SELECT COUNT(*) FROM positions WHERE status='CLOSED' AND side='SHORT'"
+        "SELECT COUNT(*) FROM positions WHERE status='CLOSED' AND is_paper=? AND side='SHORT'",
+        (mode_is_paper,),
     ).fetchone()[0]
     long_pnl = conn.execute(
-        "SELECT COALESCE(SUM(realised_pnl),0) FROM positions WHERE status='CLOSED' AND side='LONG'"
+        "SELECT COALESCE(SUM(realised_pnl),0) FROM positions WHERE status='CLOSED' "
+        "AND is_paper=? AND side='LONG'",
+        (mode_is_paper,),
     ).fetchone()[0]
     short_pnl = conn.execute(
-        "SELECT COALESCE(SUM(realised_pnl),0) FROM positions WHERE status='CLOSED' AND side='SHORT'"
+        "SELECT COALESCE(SUM(realised_pnl),0) FROM positions WHERE status='CLOSED' "
+        "AND is_paper=? AND side='SHORT'",
+        (mode_is_paper,),
     ).fetchone()[0]
 
     # First trade time
     first_trade = conn.execute(
-        "SELECT opened_at FROM positions ORDER BY opened_at ASC LIMIT 1"
+        "SELECT opened_at FROM positions WHERE is_paper=? ORDER BY opened_at ASC LIMIT 1",
+        (mode_is_paper,),
     ).fetchone()
     if first_trade and first_trade["opened_at"]:
         started = first_trade["opened_at"][:16]
@@ -199,7 +218,8 @@ async def dashboard():
     print()
     closed = conn.execute(
         "SELECT symbol, side, entry_price, qty, realised_pnl, closed_at "
-        "FROM positions WHERE status='CLOSED' ORDER BY closed_at DESC LIMIT 10"
+        "FROM positions WHERE status='CLOSED' AND is_paper=? ORDER BY closed_at DESC LIMIT 10",
+        (mode_is_paper,),
     ).fetchall()
     if closed:
         print(f"  SON KAPATILAN ISLEMLER (son 10)")

@@ -641,23 +641,21 @@ class MarketData:
             idx += 1
 
         # Use kline-based EMA as primary (reliable, no warmup bug)
-        # Fall back to running EMA only if kline indicators are not valid
+        # Fall back to running EMA only if kline indicators are not valid.
+        # Keep running EMA state warm with a single update per snapshot.
+        price_for_ema = snap.mid_price if snap.mid_price > 0 else snap.mark_price
         if snap.indicators.valid and snap.indicators.kline_fast_ema > 0:
             snap.fast_ema = snap.indicators.kline_fast_ema
             snap.slow_ema = snap.indicators.kline_slow_ema
             snap.z_score_bps = snap.indicators.kline_z_score_bps
+            if price_for_ema > 0:
+                self.update_ema(symbol, price_for_ema)
         else:
             # Fallback: running EMA (less reliable, needs warmup)
-            price_for_ema = snap.mid_price if snap.mid_price > 0 else snap.mark_price
             if price_for_ema > 0:
                 snap.fast_ema, snap.slow_ema, snap.z_score_bps = self.update_ema(
                     symbol, price_for_ema
                 )
-
-        # Always update running EMA for continuity (used as fallback)
-        price_for_ema = snap.mid_price if snap.mid_price > 0 else snap.mark_price
-        if price_for_ema > 0:
-            self.update_ema(symbol, price_for_ema)
 
         # Persist stats
         self.db.insert(
