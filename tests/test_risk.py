@@ -166,9 +166,10 @@ class TestPositionSizing:
 
     def test_respects_remaining_capacity(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
-        qty = rm.compute_position_size(price=50000, current_total_notional=14.5)
+        # max_total_notional_usdt is 30 in aggressive mode, fill up most of it
+        qty = rm.compute_position_size(price=50000, current_total_notional=29.5)
         notional = qty * 50000
-        assert notional <= 0.5 + 0.01  # only 0.5 USDT remaining
+        assert notional <= 2.1  # min 2 USDT floor, remaining ~0.5
 
     def test_zero_price_returns_zero(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)

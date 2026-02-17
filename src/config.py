@@ -39,31 +39,31 @@ class Settings(BaseSettings):
 
     # ── Capital ────────────────────────────────────────────────
     initial_capital_usdt: float = 50.0
-    max_total_notional_usdt: float = 15.0
-    max_trade_notional_usdt: float = 5.0
-    per_trade_fraction: float = 0.05
+    max_total_notional_usdt: float = 30.0   # aggressive: doubled (was 15)
+    max_trade_notional_usdt: float = 8.0    # aggressive: bigger trades (was 5)
+    per_trade_fraction: float = 0.08        # aggressive: 8% per trade (was 5%)
 
     # ── Risk ───────────────────────────────────────────────────
-    leverage: int = 2
-    leverage_high_conviction: int = 5   # when 5/5 confluence + high score, use this leverage
-    max_leverage_allowed: int = 5
+    leverage: int = 5                       # aggressive: 5x base (was 2)
+    leverage_high_conviction: int = 10      # aggressive: 10x for best signals (was 5)
+    max_leverage_allowed: int = 15          # aggressive: allow up to 15x (was 5)
     margin_mode: MarginMode = MarginMode.ISOLATED
     # High-conviction: all indicators agree → larger position + higher leverage
     high_conviction_min_confluence: int = 5
-    high_conviction_min_weighted_score: float = 75.0
-    high_conviction_size_multiplier: float = 1.5   # 1.5x position size when high conviction
-    max_trade_notional_high_conviction_usdt: float = 10.0   # cap per trade when high conviction
+    high_conviction_min_weighted_score: float = 70.0   # slightly lower bar (was 75)
+    high_conviction_size_multiplier: float = 2.0       # aggressive: 2x size (was 1.5)
+    max_trade_notional_high_conviction_usdt: float = 15.0  # bigger cap (was 10)
 
     # ── Strategy (EMA baseline) ──────────────────────────────
     fast_ema: int = 9
     slow_ema: int = 21
-    entry_threshold_bps: float = 30.0   # 30 bps = more EMA votes, more confluence (40 was too few signals)
-    tp_bps: float = 100.0               # let winners run (2:1 R:R with 50 bps SL)
+    entry_threshold_bps: float = 25.0      # aggressive: lower bar = more entries (was 30)
+    tp_bps: float = 120.0                  # aggressive: wider TP = let winners run (was 100)
     sl_bps: float = 50.0
-    max_hold_minutes: int = 180
-    cooldown_minutes: int = 12          # slightly longer cooldown = less overtrading
-    max_open_positions: int = 5
-    max_z_score_bps: float = 150.0     # skip if |z| > this (breakout, not mean reversion)
+    max_hold_minutes: int = 120            # aggressive: faster rotation (was 180)
+    cooldown_minutes: int = 6              # aggressive: faster re-entry (was 12)
+    max_open_positions: int = 8            # aggressive: more simultaneous positions (was 5)
+    max_z_score_bps: float = 200.0         # aggressive: wider range for entries (was 150)
 
     # ── Multi-Indicator (RSI, MACD, Bollinger) ───────────────
     rsi_period: int = 14
@@ -128,22 +128,22 @@ class Settings(BaseSettings):
 
     # ── Session/Funding Time Awareness ────────────────────────
     avoid_funding_window: bool = True
-    funding_window_minutes: int = 30
+    funding_window_minutes: int = 15  # aggressive: tighter window (was 30)
 
     # ── Correlation Filter ────────────────────────────────────
     use_correlation_filter: bool = True
-    max_same_direction_positions: int = 3
+    max_same_direction_positions: int = 5   # aggressive: was 3
 
     # ── Smart Exit ────────────────────────────────────────────
     use_momentum_exit: bool = True
     use_time_decay_sl: bool = True
-    time_decay_start_pct: float = 0.5
+    time_decay_start_pct: float = 0.4       # aggressive: start tightening earlier (was 0.5)
     time_decay_sl_reduction_pct: float = 0.5
 
     # ── Volatility-Adjusted Sizing ────────────────────────────
     use_volatility_sizing: bool = True
-    target_risk_pct: float = 0.01
-    volatility_sizing_atr_mult: float = 1.5
+    target_risk_pct: float = 0.02           # aggressive: 2% risk per trade (was 1%)
+    volatility_sizing_atr_mult: float = 1.2 # aggressive: less conservative sizing (was 1.5)
 
     # ── Selector ───────────────────────────────────────────────
     max_spread_bps: float = 45.0   # 25 cok sikti (425 sembol eleniyordu), 45 = daha fazla tradeable
@@ -167,20 +167,22 @@ class Settings(BaseSettings):
     partial_tp_fraction: float = 0.5
     partial_tp_trigger_pct: float = 0.5
 
-    # ── Dynamic Leverage ───────────────────────────────────────
+    # ── Dynamic Leverage (aggressive tiers) ─────────────────────
     dynamic_leverage_enabled: bool = True
     dyn_leverage_tier1_confluence: int = 3
-    dyn_leverage_tier1_weighted_score: float = 50.0
-    dyn_leverage_tier1: int = 5
+    dyn_leverage_tier1_weighted_score: float = 45.0   # aggressive: lower bar (was 50)
+    dyn_leverage_tier1: int = 7                        # aggressive: 7x (was 5)
     dyn_leverage_tier2_confluence: int = 4
-    dyn_leverage_tier2_weighted_score: float = 65.0
-    dyn_leverage_tier2: int = 7
+    dyn_leverage_tier2_weighted_score: float = 60.0    # aggressive: (was 65)
+    dyn_leverage_tier2: int = 10                       # aggressive: 10x (was 7)
     dyn_leverage_tier3_confluence: int = 5
-    dyn_leverage_tier3_weighted_score: float = 80.0
-    dyn_leverage_tier3: int = 10
+    dyn_leverage_tier3_weighted_score: float = 75.0    # aggressive: (was 80)
+    dyn_leverage_tier3: int = 15                       # aggressive: 15x (was 10)
 
     # ── Scheduling ─────────────────────────────────────────────
     scan_interval_minutes: int = 3
+    scan_interval_active_minutes: int = 1  # faster scan when positions are open
+    use_adaptive_scan: bool = True
     universe_refresh_hours: int = 6
 
     # ── Runtime Safety & Maintenance ───────────────────────────

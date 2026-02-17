@@ -13,7 +13,7 @@ class TestConfig:
         assert cfg.paper_mode is True
         assert cfg.allow_live_trading is False
         assert cfg.initial_capital_usdt == 50.0
-        assert cfg.leverage == 2
+        assert cfg.leverage == 5  # aggressive default
         assert cfg.margin_mode == MarginMode.ISOLATED
 
     def test_is_live_requires_both_flags(self) -> None:
@@ -51,21 +51,29 @@ class TestConfig:
         cfg = Settings()
         assert cfg.fast_ema == 9
         assert cfg.slow_ema == 21
-        assert cfg.entry_threshold_bps == 30.0
-        assert cfg.tp_bps == 100.0
+        assert cfg.entry_threshold_bps == 25.0  # aggressive
+        assert cfg.tp_bps == 120.0              # aggressive
         assert cfg.sl_bps == 50.0
 
-    def test_new_optimization_params(self) -> None:
-        """Test new profitability optimization parameters."""
+    def test_aggressive_params(self) -> None:
+        """Test aggressive profitability parameters."""
         cfg = Settings()
-        assert cfg.weight_vwap == 10.0
-        assert cfg.weight_momentum == 10.0
-        assert cfg.require_momentum_confirmation is True
-        assert cfg.avoid_funding_window is True
-        assert cfg.funding_window_minutes == 30
-        assert cfg.use_correlation_filter is True
-        assert cfg.max_same_direction_positions == 3
-        assert cfg.use_momentum_exit is True
-        assert cfg.use_time_decay_sl is True
-        assert cfg.use_volatility_sizing is True
-        assert cfg.target_risk_pct == 0.01
+        # Aggressive capital/risk
+        assert cfg.max_total_notional_usdt == 30.0
+        assert cfg.max_trade_notional_usdt == 8.0
+        assert cfg.per_trade_fraction == 0.08
+        assert cfg.leverage == 5
+        assert cfg.leverage_high_conviction == 10
+        assert cfg.max_leverage_allowed == 15
+        assert cfg.max_open_positions == 8
+        assert cfg.cooldown_minutes == 6
+        # Aggressive sizing
+        assert cfg.target_risk_pct == 0.02
+        assert cfg.max_same_direction_positions == 5
+        # Dynamic leverage
+        assert cfg.dyn_leverage_tier1 == 7
+        assert cfg.dyn_leverage_tier2 == 10
+        assert cfg.dyn_leverage_tier3 == 15
+        # Adaptive scan
+        assert cfg.use_adaptive_scan is True
+        assert cfg.scan_interval_active_minutes == 1

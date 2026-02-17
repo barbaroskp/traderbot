@@ -141,7 +141,8 @@ class TestConfluenceSignals:
 
     def test_rejects_max_positions(self, strategy) -> None:
         snaps = [_make_snap("ETH-USDT", z=-35, rsi=25, macd_hist=0.001, macd_hist_prev=-0.001, bb_pct=0.1, trend="UP")]
-        open_pos = [{"symbol": f"SYM{i}-USDT"} for i in range(5)]
+        # max_open_positions is 8 in aggressive mode
+        open_pos = [{"symbol": f"SYM{i}-USDT"} for i in range(8)]
         signals = strategy.generate_signals(snaps, open_pos)
         assert len(signals) == 0
 
