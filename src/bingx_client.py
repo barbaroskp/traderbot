@@ -290,13 +290,28 @@ class BingXClient:
         return data.get("data", {})
 
     async def get_klines(
-        self, symbol: str, interval: str = "1m", limit: int = 100
+        self,
+        symbol: str,
+        interval: str = "1m",
+        limit: int = 100,
+        start_time: int | None = None,
+        end_time: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Kline / candlestick data."""
+        """Kline / candlestick data.
+
+        Args:
+            start_time: Start time in milliseconds (optional, for historical fetch).
+            end_time: End time in milliseconds (optional).
+        """
+        params: dict[str, Any] = {"symbol": symbol, "interval": interval, "limit": limit}
+        if start_time is not None:
+            params["startTime"] = start_time
+        if end_time is not None:
+            params["endTime"] = end_time
         data = await self._request(
             "GET",
             "/openApi/swap/v2/quote/klines",
-            params={"symbol": symbol, "interval": interval, "limit": limit},
+            params=params,
             signed=False,
         )
         return data.get("data", [])
