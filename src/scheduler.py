@@ -643,6 +643,7 @@ class Scheduler:
                     "deleted": deleted,
                     "retention_days": self.cfg.db_retention_days,
                     "vacuum": do_vacuum,
+                    "db_size_mb": round(self.db.db_size_mb(), 2),
                 },
             )
         except Exception as exc:

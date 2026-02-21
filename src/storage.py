@@ -363,12 +363,26 @@ class Storage:
 
         return deleted
 
+    # Alias for CLI / backtest compatibility
+    cleanup_old_data = prune_runtime_data
+
     def checkpoint_and_vacuum(self, vacuum: bool = False) -> None:
         """Compact WAL and optionally VACUUM database file."""
         conn = self._get_conn()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         if vacuum:
             conn.execute("VACUUM")
+
+    def vacuum(self) -> None:
+        """Reclaim disk space after deletions."""
+        conn = self._get_conn()
+        conn.execute("VACUUM")
+
+    def db_size_mb(self) -> float:
+        """Return database file size in MB."""
+        if self.db_path.exists():
+            return self.db_path.stat().st_size / (1024 * 1024)
+        return 0.0
 
     def close(self) -> None:
         if self._conn:

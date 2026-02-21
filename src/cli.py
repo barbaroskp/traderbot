@@ -139,6 +139,70 @@ def status() -> None:
     db.close()
 
 
+@cli.command("backtest")
+@click.option("--symbols", "-s", default="BTC-USDT", help="Comma-separated symbols")
+@click.option("--days", "-d", type=int, default=30, help="Days to backtest")
+@click.option("--capital", type=float, default=None, help="Initial capital USDT")
+@click.option("--tp-bps", type=float, default=None, help="Override TP bps")
+@click.option("--sl-bps", type=float, default=None, help="Override SL bps")
+@click.option("--csv-output", is_flag=True, help="Save trade log as CSV")
+def backtest(
+    symbols: str,
+    days: int,
+    capital: float | None,
+    tp_bps: float | None,
+    sl_bps: float | None,
+    csv_output: bool,
+) -> None:
+    """Run backtest on historical data."""
+    from src.backtest import BacktestEngine, print_report, save_report_csv
+
+    cfg = load_config()
+
+    overrides: dict = {}
+    if tp_bps is not None:
+        overrides["tp_bps"] = tp_bps
+    if sl_bps is not None:
+        overrides["sl_bps"] = sl_bps
+    if overrides:
+        cfg = cfg.model_copy(update=overrides)
+
+    sym_list = [s.strip() for s in symbols.split(",")]
+
+    engine = BacktestEngine(
+        cfg=cfg,
+        symbols=sym_list,
+        days=days,
+        initial_capital=capital,
+    )
+    report = asyncio.run(engine.run())
+    print_report(report)
+
+    if csv_output:
+        save_report_csv(report)
+
+
+@cli.command("db-cleanup")
+def db_cleanup() -> None:
+    """Run database cleanup and vacuum manually."""
+    cfg = load_config()
+    db = Storage(cfg.db_path)
+
+    size_before = db.db_size_mb()
+    click.echo(f"DB size before: {size_before:.2f} MB")
+
+    deleted = db.cleanup_old_data(cfg.db_retention_days)
+    for table, count in deleted.items():
+        if count > 0:
+            click.echo(f"  Deleted {count} rows from {table}")
+
+    db.vacuum()
+    size_after = db.db_size_mb()
+    click.echo(f"DB size after: {size_after:.2f} MB")
+    click.echo(f"Freed: {size_before - size_after:.2f} MB")
+    db.close()
+
+
 @cli.command("export-csv")
 @click.option("--table", type=click.Choice(["trades", "signals", "pnl", "orders"]), default="trades")
 @click.option("--output", "-o", default=None, help="Output file path")
