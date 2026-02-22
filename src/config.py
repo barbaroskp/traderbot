@@ -220,6 +220,24 @@ class Settings(BaseSettings):
     risk_max_minutes_in_tight: int = 20
     risk_max_minutes_in_ultra: int = 45
 
+    # ── Swing Trading (1h candles, wider TP/SL) ────────────────
+    swing_enabled: bool = True
+    swing_interval: str = "1h"
+    swing_kline_limit: int = 100
+    swing_trend_interval: str = "4h"       # trend filter timeframe
+    swing_trend_limit: int = 50
+    swing_scan_every_n_cycles: int = 5     # run swing every N scalp cycles (~15 min)
+    swing_tp_bps: float = 300.0            # 3% take profit
+    swing_sl_bps: float = 150.0            # 1.5% stop loss
+    swing_max_hold_minutes: int = 1440     # 24 hours
+    swing_max_positions: int = 3           # separate cap from scalp
+    swing_min_confluence: int = 3
+    swing_require_trend_alignment: bool = True  # 4h trend must confirm
+    swing_atr_sl_multiplier: float = 1.5
+    swing_atr_tp_multiplier: float = 3.0
+    swing_cooldown_minutes: int = 30       # longer cooldown for swing
+    swing_leverage: int = 3                # lower leverage for swing (longer hold)
+
     # ── Scheduling ─────────────────────────────────────────────
     scan_interval_minutes: int = 3
     scan_interval_active_minutes: int = 1  # faster scan when positions are open

@@ -84,6 +84,7 @@ class Signal:
     # ── New fields ──
     momentum_confirmed: bool = False
     vwap_deviation_bps: float = 0.0
+    trade_type: str = "scalp"  # "scalp" or "swing"
 
     def __post_init__(self) -> None:
         if not self.ts:
@@ -871,6 +872,121 @@ class Strategy:
         elif risk_state == "ULTRA_TIGHT":
             return max(2, base - 2)
         return base
+
+    def generate_swing_signals(
+        self,
+        snapshots: list[SymbolSnapshot],
+        open_positions: list[dict[str, Any]],
+        risk_state: str = "NORMAL",
+    ) -> list[Signal]:
+        """Generate swing signals from 1h kline snapshots.
+
+        Reuses the same indicator voting system but with swing-specific filters:
+        - Separate max position count (swing_max_positions)
+        - 4h trend alignment required
+        - Longer cooldowns
+        - Higher min confluence
+        """
+        now = datetime.now(timezone.utc)
+        cfg = self.cfg
+
+        # Count existing swing positions separately
+        swing_positions = [p for p in open_positions if p.get("trade_type") == "swing"]
+        open_swing_symbols = {p["symbol"] for p in swing_positions}
+        all_open_symbols = {p["symbol"] for p in open_positions}
+
+        if len(swing_positions) >= cfg.swing_max_positions:
+            return []
+
+        signals: list[Signal] = []
+        swing_count = len(swing_positions)
+
+        for snap in snapshots:
+            if snap.symbol in all_open_symbols:
+                continue
+            if swing_count >= cfg.swing_max_positions:
+                break
+
+            # Check swing cooldown (separate from scalp)
+            last_cd = self._cooldowns.get(f"swing_{snap.symbol}")
+            if last_cd:
+                elapsed = (now - last_cd).total_seconds() / 60
+                if elapsed < cfg.swing_cooldown_minutes:
+                    continue
+
+            indicators = snap.indicators
+            if not indicators.valid:
+                continue
+
+            votes = self._compute_votes(snap)
+            long_votes = [v for v in votes if v.side == "LONG"]
+            short_votes = [v for v in votes if v.side == "SHORT"]
+
+            if len(long_votes) >= cfg.swing_min_confluence and len(long_votes) > len(short_votes):
+                side = "LONG"
+                confluence = len(long_votes)
+                weighted = sum(v.weight for v in long_votes)
+            elif len(short_votes) >= cfg.swing_min_confluence and len(short_votes) > len(long_votes):
+                side = "SHORT"
+                confluence = len(short_votes)
+                weighted = sum(v.weight for v in short_votes)
+            else:
+                continue
+
+            # 4h trend must align
+            if cfg.swing_require_trend_alignment and indicators.higher_tf_trend != "NEUTRAL":
+                if side == "LONG" and indicators.higher_tf_trend != "UP":
+                    continue
+                if side == "SHORT" and indicators.higher_tf_trend != "DOWN":
+                    continue
+
+            # Spread/depth checks
+            min_depth = min(snap.bid_depth_usdt, snap.ask_depth_usdt)
+            if snap.spread_bps > cfg.max_spread_bps or min_depth < cfg.min_depth_usdt:
+                continue
+
+            signal = Signal(
+                symbol=snap.symbol,
+                side=side,
+                z_score_bps=snap.z_score_bps,
+                mid_price=snap.mid_price,
+                fast_ema=snap.fast_ema,
+                slow_ema=snap.slow_ema,
+                spread_bps=snap.spread_bps,
+                depth_usdt=min_depth,
+                confluence_score=confluence,
+                weighted_score=weighted,
+                indicator_votes=votes,
+                rsi=indicators.rsi,
+                macd_histogram=indicators.macd_histogram,
+                macd_histogram_prev=indicators.macd_histogram_prev,
+                bollinger_pct=indicators.bollinger_pct,
+                trend_direction=indicators.trend_direction,
+                higher_tf_trend=indicators.higher_tf_trend,
+                atr=indicators.atr,
+                adx=indicators.adx,
+                plus_di=indicators.plus_di,
+                minus_di=indicators.minus_di,
+                funding_rate=snap.funding_rate,
+                volume_ratio=indicators.volume_ratio,
+                volume_spike=indicators.volume_spike,
+                mode="SWING",
+                trade_type="swing",
+            )
+            signal.accepted = True
+            signals.append(signal)
+            self._persist_signal(signal)
+            swing_count += 1
+
+        log.info(
+            "swing signal generation",
+            extra={"candidates": len(snapshots), "accepted": len(signals)},
+        )
+        return signals
+
+    def set_swing_cooldown(self, symbol: str) -> None:
+        """Set cooldown for swing trade."""
+        self._cooldowns[f"swing_{symbol}"] = datetime.now(timezone.utc)
 
     def _persist_signal(self, signal: Signal) -> None:
         self.db.insert(

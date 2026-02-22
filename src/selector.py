@@ -38,6 +38,7 @@ class Selector:
         self.cfg = cfg
         self.universe = universe
         self.market = market
+        self.last_shortlist: list[str] = []  # cached for swing reuse
 
     async def select(self, risk_state: str = "NORMAL") -> tuple[list[SymbolSnapshot], FilterStats]:
         """Run the full selection pipeline.
@@ -70,6 +71,9 @@ class Selector:
         elif risk_state == "TIGHT":
             shortlist = shortlist[:200]
             stats.shortlisted = len(shortlist)
+
+        # Cache shortlist symbols for swing cycle reuse
+        self.last_shortlist = shortlist
 
         # ── Stage 3: Fetch depth + final filter ─────────────────
         snapshots = await self.market.batch_snapshots(shortlist, fetch_depth=True, concurrency=5)

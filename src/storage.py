@@ -217,6 +217,12 @@ class Storage:
         if "leverage" not in pos_cols:
             conn.execute("ALTER TABLE positions ADD COLUMN leverage INTEGER DEFAULT 1")
 
+        # Positions: trade type (scalp/swing)
+        if "trade_type" not in pos_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN trade_type TEXT DEFAULT 'scalp'")
+        if "max_hold_minutes" not in pos_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN max_hold_minutes INTEGER")
+
         # Orders: TP level
         if "tp_level" not in ord_cols:
             conn.execute("ALTER TABLE orders ADD COLUMN tp_level INTEGER DEFAULT 0")
