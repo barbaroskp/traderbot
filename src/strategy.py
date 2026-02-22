@@ -1,6 +1,6 @@
 """Multi-indicator confluence strategy – optimized for maximum profitability.
 
-Signal generation uses 9 independent indicators that each "vote" for LONG, SHORT, or NEUTRAL.
+Signal generation uses 12 independent indicators that each "vote" for LONG, SHORT, or NEUTRAL.
 A trade is only taken when enough indicators agree (confluence).
 
 Indicators:
@@ -13,12 +13,16 @@ Indicators:
   7. Volume Spike: Trend-aligned volume surge confirmation
   8. VWAP: Price below VWAP → LONG (undervalued), above → SHORT (mean reversion)
   9. Momentum: MACD histogram strengthening in signal direction
+  10. RSI Divergence: Price/RSI divergence reversal signals (1.5x RSI weight)
+  11. Stochastic RSI: More sensitive overbought/oversold via stochastic of RSI
+  12. ADX Strength: Directional movement confirms trend (+DI vs -DI)
 
-Additional filters:
+Additional filters & bonuses:
   - Funding time avoidance (±30 min around 00/08/16 UTC)
   - Correlation filter (max same-direction positions)
   - Momentum quality filter (require momentum confirmation at min confluence)
   - Signal strength scoring (indicator extremity bonus)
+  - Higher-TF alignment bonus (15m trend confirms 5m signal)
 """
 
 from __future__ import annotations
@@ -271,6 +275,12 @@ class Strategy:
 
         # ── Signal strength bonus: reward indicator extremity ──
         weighted_score += self._compute_extremity_bonus(indicators, side)
+
+        # ── Higher-TF alignment bonus: 15m trend confirms 5m signal ──
+        if self.cfg.higher_tf_alignment_bonus > 0 and indicators.higher_tf_trend != "NEUTRAL":
+            if (side == "LONG" and indicators.higher_tf_trend == "UP") or \
+               (side == "SHORT" and indicators.higher_tf_trend == "DOWN"):
+                weighted_score += self.cfg.higher_tf_alignment_bonus
 
         # Check momentum confirmation
         momentum_confirmed = self._check_momentum(indicators, side)
@@ -723,6 +733,50 @@ class Strategy:
                 value=indicators.rsi,
                 reason="bearish RSI divergence (price higher high, RSI lower high)",
             ))
+
+        # 11. Stochastic RSI vote (more sensitive than RSI for extremes)
+        stoch_k = indicators.stoch_rsi_k
+        stoch_d = indicators.stoch_rsi_d
+        if stoch_k <= cfg.stoch_rsi_oversold and stoch_d <= cfg.stoch_rsi_oversold:
+            votes.append(IndicatorVote(
+                name="stoch_rsi", side="LONG", weight=cfg.weight_stoch_rsi,
+                value=stoch_k,
+                reason=f"StochRSI K={stoch_k:.0f} D={stoch_d:.0f} (oversold)",
+            ))
+        elif stoch_k >= cfg.stoch_rsi_overbought and stoch_d >= cfg.stoch_rsi_overbought:
+            votes.append(IndicatorVote(
+                name="stoch_rsi", side="SHORT", weight=cfg.weight_stoch_rsi,
+                value=stoch_k,
+                reason=f"StochRSI K={stoch_k:.0f} D={stoch_d:.0f} (overbought)",
+            ))
+        # StochRSI crossover: %K crosses %D from below in oversold zone → LONG
+        elif stoch_k < 35 and stoch_k > stoch_d and stoch_d < 30:
+            votes.append(IndicatorVote(
+                name="stoch_rsi", side="LONG", weight=cfg.weight_stoch_rsi * 0.5,
+                value=stoch_k,
+                reason=f"StochRSI bullish cross K={stoch_k:.0f}>D={stoch_d:.0f}",
+            ))
+        elif stoch_k > 65 and stoch_k < stoch_d and stoch_d > 70:
+            votes.append(IndicatorVote(
+                name="stoch_rsi", side="SHORT", weight=cfg.weight_stoch_rsi * 0.5,
+                value=stoch_k,
+                reason=f"StochRSI bearish cross K={stoch_k:.0f}<D={stoch_d:.0f}",
+            ))
+
+        # 12. ADX strength vote (strong trend in signal direction)
+        if indicators.adx >= cfg.adx_trend_threshold:
+            if indicators.plus_di > indicators.minus_di:
+                votes.append(IndicatorVote(
+                    name="adx", side="LONG", weight=cfg.weight_adx,
+                    value=indicators.adx,
+                    reason=f"ADX={indicators.adx:.0f} +DI>{indicators.minus_di:.0f} (strong uptrend)",
+                ))
+            elif indicators.minus_di > indicators.plus_di:
+                votes.append(IndicatorVote(
+                    name="adx", side="SHORT", weight=cfg.weight_adx,
+                    value=indicators.adx,
+                    reason=f"ADX={indicators.adx:.0f} -DI>{indicators.plus_di:.0f} (strong downtrend)",
+                ))
 
         return votes
 

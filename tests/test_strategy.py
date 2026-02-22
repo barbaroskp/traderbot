@@ -355,3 +355,156 @@ class TestVWAPVote:
         vwap_votes = [v for v in signals[0].indicator_votes if v.name == "vwap"]
         assert len(vwap_votes) == 1
         assert vwap_votes[0].side == "LONG"
+
+
+class TestStochRSIVote:
+    def test_stoch_rsi_oversold_adds_long_vote(self, strategy_cfg, db) -> None:
+        strategy_cfg.require_momentum_confirmation = False
+        strat = Strategy(strategy_cfg, db)
+        snap = _make_snap(
+            "BTC-USDT", z=-35, rsi=25,
+            macd_hist=0.001, macd_hist_prev=0.0,
+            bb_pct=0.1, trend="UP",
+        )
+        snap.indicators.stoch_rsi_k = 10.0
+        snap.indicators.stoch_rsi_d = 15.0
+        signals = strat.generate_signals([snap], [])
+        assert len(signals) == 1
+        stoch_votes = [v for v in signals[0].indicator_votes if v.name == "stoch_rsi"]
+        assert len(stoch_votes) == 1
+        assert stoch_votes[0].side == "LONG"
+
+    def test_stoch_rsi_overbought_adds_short_vote(self, strategy_cfg, db) -> None:
+        strategy_cfg.require_momentum_confirmation = False
+        strat = Strategy(strategy_cfg, db)
+        snap = _make_snap(
+            "BTC-USDT", z=35, rsi=75,
+            macd_hist=-0.001, macd_hist_prev=0.001,
+            bb_pct=0.9, trend="DOWN",
+        )
+        snap.indicators.stoch_rsi_k = 90.0
+        snap.indicators.stoch_rsi_d = 85.0
+        signals = strat.generate_signals([snap], [])
+        assert len(signals) == 1
+        stoch_votes = [v for v in signals[0].indicator_votes if v.name == "stoch_rsi"]
+        assert len(stoch_votes) == 1
+        assert stoch_votes[0].side == "SHORT"
+
+    def test_stoch_rsi_neutral_no_vote(self, strategy_cfg, db) -> None:
+        strategy_cfg.require_momentum_confirmation = False
+        strat = Strategy(strategy_cfg, db)
+        snap = _make_snap(
+            "BTC-USDT", z=-35, rsi=25,
+            macd_hist=0.001, macd_hist_prev=0.0,
+            bb_pct=0.1, trend="UP",
+        )
+        snap.indicators.stoch_rsi_k = 50.0
+        snap.indicators.stoch_rsi_d = 50.0
+        signals = strat.generate_signals([snap], [])
+        stoch_votes = [v for v in signals[0].indicator_votes if v.name == "stoch_rsi"]
+        assert len(stoch_votes) == 0
+
+
+class TestADXVote:
+    def test_adx_strong_uptrend_adds_long_vote(self, strategy_cfg, db) -> None:
+        strategy_cfg.require_momentum_confirmation = False
+        strat = Strategy(strategy_cfg, db)
+        snap = _make_snap(
+            "BTC-USDT", z=-35, rsi=25,
+            macd_hist=0.001, macd_hist_prev=0.0,
+            bb_pct=0.1, trend="UP", adx=30.0,
+        )
+        # +DI > -DI (set by _make_snap when trend="UP")
+        signals = strat.generate_signals([snap], [])
+        assert len(signals) == 1
+        adx_votes = [v for v in signals[0].indicator_votes if v.name == "adx"]
+        assert len(adx_votes) == 1
+        assert adx_votes[0].side == "LONG"
+
+    def test_adx_strong_downtrend_adds_short_vote(self, strategy_cfg, db) -> None:
+        strategy_cfg.require_momentum_confirmation = False
+        strat = Strategy(strategy_cfg, db)
+        snap = _make_snap(
+            "BTC-USDT", z=35, rsi=75,
+            macd_hist=-0.001, macd_hist_prev=0.001,
+            bb_pct=0.9, trend="DOWN", adx=30.0,
+        )
+        signals = strat.generate_signals([snap], [])
+        assert len(signals) == 1
+        adx_votes = [v for v in signals[0].indicator_votes if v.name == "adx"]
+        assert len(adx_votes) == 1
+        assert adx_votes[0].side == "SHORT"
+
+    def test_adx_weak_no_vote(self, strategy_cfg, db) -> None:
+        strategy_cfg.require_momentum_confirmation = False
+        strat = Strategy(strategy_cfg, db)
+        snap = _make_snap(
+            "BTC-USDT", z=-35, rsi=25,
+            macd_hist=0.001, macd_hist_prev=0.0,
+            bb_pct=0.1, trend="UP", adx=15.0,
+        )
+        signals = strat.generate_signals([snap], [])
+        adx_votes = [v for v in signals[0].indicator_votes if v.name == "adx"]
+        assert len(adx_votes) == 0
+
+
+class TestHTFAlignmentBonus:
+    def test_htf_alignment_boosts_score(self, strategy_cfg, db) -> None:
+        strategy_cfg.require_momentum_confirmation = False
+        strategy_cfg.higher_tf_alignment_bonus = 15.0
+        strat = Strategy(strategy_cfg, db)
+        # Without HTF alignment
+        snap_no_htf = _make_snap(
+            "BTC-USDT", z=-35, rsi=25,
+            macd_hist=0.001, macd_hist_prev=0.0,
+            bb_pct=0.1, trend="UP",
+        )
+        snap_no_htf.indicators.higher_tf_trend = "NEUTRAL"
+        signals_no = strat.generate_signals([snap_no_htf], [])
+        # With HTF alignment
+        snap_htf = _make_snap(
+            "ETH-USDT", z=-35, rsi=25,
+            macd_hist=0.001, macd_hist_prev=0.0,
+            bb_pct=0.1, trend="UP",
+        )
+        snap_htf.indicators.higher_tf_trend = "UP"
+        signals_htf = strat.generate_signals([snap_htf], [])
+        assert len(signals_no) == 1
+        assert len(signals_htf) == 1
+        assert signals_htf[0].weighted_score > signals_no[0].weighted_score
+
+
+class TestStochRSIComputation:
+    def test_stochastic_rsi_oversold_values(self) -> None:
+        """StochRSI returns low values after a decline following oscillation."""
+        import random
+        from src.marketdata import MarketData
+        random.seed(42)
+        # Oscillating warmup (creates varying RSI) then decline
+        closes = [100.0]
+        for _ in range(50):
+            closes.append(closes[-1] * (1 + random.uniform(-0.008, 0.008)))
+        for _ in range(50):
+            closes.append(closes[-1] * 0.996)  # steady decline
+        k, d = MarketData._compute_stochastic_rsi(closes, rsi_period=14)
+        assert k < 30, f"Expected StochRSI K < 30 for declining prices, got {k}"
+
+    def test_stochastic_rsi_overbought_values(self) -> None:
+        """StochRSI returns high values after a rise following oscillation."""
+        import random
+        from src.marketdata import MarketData
+        random.seed(42)
+        closes = [100.0]
+        for _ in range(50):
+            closes.append(closes[-1] * (1 + random.uniform(-0.008, 0.008)))
+        for _ in range(50):
+            closes.append(closes[-1] * 1.006)  # steady rise
+        k, d = MarketData._compute_stochastic_rsi(closes, rsi_period=14)
+        assert k > 70, f"Expected StochRSI K > 70 for rising prices, got {k}"
+
+    def test_stochastic_rsi_insufficient_data(self) -> None:
+        """Returns defaults when not enough data."""
+        from src.marketdata import MarketData
+        k, d = MarketData._compute_stochastic_rsi([100.0] * 10, rsi_period=14)
+        assert k == 50.0
+        assert d == 50.0

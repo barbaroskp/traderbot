@@ -158,8 +158,14 @@ class PaperExecution(ExecutionAdapter):
         if qty <= 0:
             return None
 
-        # ── Simulate fill price with slippage ───────────────────
-        slippage_mult = self.cfg.slippage_assumption_bps / 10_000
+        # ── Simulate fill price with dynamic slippage ─────────────
+        # Use the larger of: half the actual spread, or the configured assumption.
+        # Wide-spread coins get realistic higher slippage; tight coins stay low.
+        effective_slippage_bps = max(
+            snap.spread_bps * 0.5,
+            self.cfg.slippage_assumption_bps,
+        ) if snap.spread_bps > 0 else self.cfg.slippage_assumption_bps
+        slippage_mult = effective_slippage_bps / 10_000
         if signal.side == "LONG":
             fill_price = snap.best_ask * (1 + slippage_mult)
         else:
