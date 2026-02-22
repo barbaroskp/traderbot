@@ -205,6 +205,18 @@ class MarketData:
             log.warning("kline fetch failed", extra={"symbol": symbol, "error": str(exc)})
             return []
 
+    async def fetch_klines_custom(
+        self, symbol: str, interval: str, limit: int
+    ) -> list[dict[str, Any]]:
+        """Fetch klines with custom interval/limit (for swing trading)."""
+        try:
+            return await self.client.get_klines(symbol, interval=interval, limit=limit)
+        except BingXClientError as exc:
+            log.warning("custom kline fetch failed", extra={
+                "symbol": symbol, "interval": interval, "error": str(exc),
+            })
+            return []
+
     async def fetch_klines_higher_tf(self, symbol: str) -> list[dict[str, Any]]:
         """Fetch higher-timeframe kline data for trend confirmation."""
         try:
@@ -755,6 +767,94 @@ class MarketData:
         )
 
         return snap
+
+    async def snapshot_symbol_swing(
+        self,
+        symbol: str,
+        swing_interval: str = "1h",
+        swing_limit: int = 100,
+        trend_interval: str = "4h",
+        trend_limit: int = 50,
+    ) -> SymbolSnapshot:
+        """Snapshot using swing timeframe klines (1h) + 4h trend filter."""
+        snap = SymbolSnapshot(symbol=symbol)
+        snap.ts = datetime.now(timezone.utc).isoformat()
+
+        tasks = [
+            self.fetch_depth(symbol),
+            self.fetch_premium_index(symbol),
+            self.fetch_klines_custom(symbol, swing_interval, swing_limit),
+            self.fetch_klines_custom(symbol, trend_interval, trend_limit),
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Depth
+        depth = results[0] if not isinstance(results[0], Exception) else DepthSnapshot()
+        if isinstance(depth, DepthSnapshot):
+            snap.best_bid = depth.best_bid
+            snap.best_ask = depth.best_ask
+            snap.spread_bps = depth.spread_bps
+            snap.bid_depth_usdt = depth.bid_depth_usdt
+            snap.ask_depth_usdt = depth.ask_depth_usdt
+            snap.mid_price = depth.mid_price
+            snap.imbalance_ratio = depth.imbalance_ratio
+
+        # Mark price + funding
+        premium = results[1]
+        if not isinstance(premium, Exception) and isinstance(premium, dict):
+            try:
+                snap.mark_price = float(premium.get("markPrice", 0))
+            except ValueError:
+                snap.mark_price = 0.0
+            try:
+                snap.funding_rate = float(premium.get("lastFundingRate", 0))
+            except ValueError:
+                snap.funding_rate = 0.0
+
+        # Swing klines -> indicators
+        klines = results[2]
+        if not isinstance(klines, Exception) and isinstance(klines, list):
+            snap.indicators = self.compute_indicators(klines)
+
+        # 4h trend
+        trend_klines = results[3]
+        if not isinstance(trend_klines, Exception) and isinstance(trend_klines, list):
+            trend_ind = self.compute_indicators(trend_klines)
+            snap.indicators.higher_tf_trend = trend_ind.trend_direction
+
+        # EMA from swing klines
+        if snap.indicators.valid and snap.indicators.kline_fast_ema > 0:
+            snap.fast_ema = snap.indicators.kline_fast_ema
+            snap.slow_ema = snap.indicators.kline_slow_ema
+            snap.z_score_bps = snap.indicators.kline_z_score_bps
+
+        return snap
+
+    async def batch_snapshots_swing(
+        self,
+        symbols: list[str],
+        swing_interval: str = "1h",
+        swing_limit: int = 100,
+        trend_interval: str = "4h",
+        trend_limit: int = 50,
+        concurrency: int = 3,
+    ) -> list[SymbolSnapshot]:
+        """Fetch swing snapshots with lower concurrency (heavier API load)."""
+        sem = asyncio.Semaphore(concurrency)
+        results: list[SymbolSnapshot] = []
+
+        async def _fetch(sym: str) -> SymbolSnapshot:
+            async with sem:
+                return await self.snapshot_symbol_swing(
+                    sym, swing_interval, swing_limit, trend_interval, trend_limit,
+                )
+
+        tasks = [_fetch(s) for s in symbols]
+        raw = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in raw:
+            if isinstance(r, SymbolSnapshot):
+                results.append(r)
+        return results
 
     async def batch_snapshots(
         self,

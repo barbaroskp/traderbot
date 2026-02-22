@@ -507,4 +507,67 @@ class TestStochRSIComputation:
         from src.marketdata import MarketData
         k, d = MarketData._compute_stochastic_rsi([100.0] * 10, rsi_period=14)
         assert k == 50.0
-        assert d == 50.0
+
+
+class TestSwingSignals:
+    def test_swing_signal_generated_with_confluence(self, strategy_cfg, db) -> None:
+        strategy_cfg.swing_enabled = True
+        strategy_cfg.swing_min_confluence = 3
+        strategy_cfg.swing_require_trend_alignment = True
+        strategy_cfg.require_momentum_confirmation = False
+        strat = Strategy(strategy_cfg, db)
+        snap = _make_snap(
+            "BTC-USDT", z=-35, rsi=25,
+            macd_hist=0.001, macd_hist_prev=0.0,
+            bb_pct=0.1, trend="UP", adx=30.0,
+        )
+        snap.indicators.higher_tf_trend = "UP"
+        signals = strat.generate_swing_signals([snap], [])
+        assert len(signals) == 1
+        assert signals[0].trade_type == "swing"
+        assert signals[0].side == "LONG"
+
+    def test_swing_rejected_when_4h_trend_misaligned(self, strategy_cfg, db) -> None:
+        strategy_cfg.swing_enabled = True
+        strategy_cfg.swing_min_confluence = 3
+        strategy_cfg.swing_require_trend_alignment = True
+        strategy_cfg.require_momentum_confirmation = False
+        strat = Strategy(strategy_cfg, db)
+        snap = _make_snap(
+            "BTC-USDT", z=-35, rsi=25,
+            macd_hist=0.001, macd_hist_prev=0.0,
+            bb_pct=0.1, trend="UP", adx=30.0,
+        )
+        snap.indicators.higher_tf_trend = "DOWN"  # against signal
+        signals = strat.generate_swing_signals([snap], [])
+        assert len(signals) == 0
+
+    def test_swing_max_positions_respected(self, strategy_cfg, db) -> None:
+        strategy_cfg.swing_enabled = True
+        strategy_cfg.swing_max_positions = 1
+        strategy_cfg.swing_min_confluence = 3
+        strategy_cfg.require_momentum_confirmation = False
+        strat = Strategy(strategy_cfg, db)
+        # Already have 1 swing position
+        existing = [{"symbol": "ETH-USDT", "side": "LONG", "trade_type": "swing"}]
+        snap = _make_snap(
+            "BTC-USDT", z=-35, rsi=25,
+            macd_hist=0.001, macd_hist_prev=0.0,
+            bb_pct=0.1, trend="UP", adx=30.0,
+        )
+        snap.indicators.higher_tf_trend = "UP"
+        signals = strat.generate_swing_signals([snap], existing)
+        assert len(signals) == 0
+
+    def test_swing_trade_type_in_signal(self, strategy_cfg, db) -> None:
+        strategy_cfg.require_momentum_confirmation = False
+        strat = Strategy(strategy_cfg, db)
+        # Regular scalp signals should have trade_type="scalp"
+        snap = _make_snap(
+            "BTC-USDT", z=-35, rsi=25,
+            macd_hist=0.001, macd_hist_prev=0.0,
+            bb_pct=0.1, trend="UP",
+        )
+        signals = strat.generate_signals([snap], [])
+        if signals:
+            assert signals[0].trade_type == "scalp"

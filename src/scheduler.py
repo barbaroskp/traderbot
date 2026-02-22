@@ -228,8 +228,14 @@ class Scheduler:
             "recent_pnl_summary": f"realised {summary['realised_pnl']:.2f}",
         }
 
+        # ── 5c. Swing signal generation (every N cycles) ──────────
+        swing_signals = []
+        if self.cfg.swing_enabled and self._cycle_count % self.cfg.swing_scan_every_n_cycles == 0:
+            swing_signals = await self._run_swing_cycle(open_positions, risk_state)
+
         # ── 6. Execute signals (best first by weighted score) ─────
-        signals_sorted = sorted(signals, key=lambda s: (s.confluence_score, s.weighted_score), reverse=True)
+        all_signals = signals + swing_signals
+        signals_sorted = sorted(all_signals, key=lambda s: (s.confluence_score, s.weighted_score), reverse=True)
         current_notional = self.portfolio.get_total_notional(is_paper)
         executed = 0
 
@@ -265,7 +271,11 @@ class Scheduler:
                     continue
 
                 # Dynamic leverage by confluence/score (optional)
-                effective_leverage: int | None = self._dynamic_leverage(sig)
+                # Swing trades use fixed lower leverage
+                if getattr(sig, "trade_type", "scalp") == "swing":
+                    effective_leverage: int | None = self.cfg.swing_leverage
+                else:
+                    effective_leverage: int | None = self._dynamic_leverage(sig)
 
                 # High-conviction: 5/5 confluence + high weighted score -> larger position + higher leverage
                 is_high_conviction = (
@@ -337,7 +347,10 @@ class Scheduler:
                 if result and result.status == "FILLED":
                     executed += 1
                     current_notional += result.avg_fill_price * result.filled_qty
-                    self.strategy.set_cooldown(sig.symbol)
+                    if getattr(sig, "trade_type", "scalp") == "swing":
+                        self.strategy.set_swing_cooldown(sig.symbol)
+                    else:
+                        self.strategy.set_cooldown(sig.symbol)
 
         # ── 7. Cancel stale orders ──────────────────────────────
         cancelled = await self.execution.cancel_stale_orders(max_age_minutes=30)
@@ -361,7 +374,8 @@ class Scheduler:
                 "universe_size": filter_stats.universe_size,
                 "tradeable": filter_stats.tradeable,
                 "shortlisted": filter_stats.shortlisted,
-                "signals": len(signals),
+                "signals_scalp": len(signals),
+                "signals_swing": len(swing_signals),
                 "executed": executed,
                 "exits": len(closed),
                 "cancelled_orders": cancelled,
@@ -660,6 +674,49 @@ class Scheduler:
             "universe_size": self.universe.size,
             "api_stats": self.client.stats,
         }
+
+    async def _run_swing_cycle(
+        self,
+        open_positions: list[dict[str, Any]],
+        risk_state: Any,
+    ) -> list:
+        """Run swing signal generation on 1h klines with 4h trend filter."""
+        try:
+            # Re-use the selector's shortlist (already filtered by spread/depth/vol)
+            shortlisted = self.selector.last_shortlist
+            if not shortlisted:
+                return []
+
+            # Limit scan to top symbols to control API usage
+            scan_symbols = shortlisted[:50]
+
+            swing_snaps = await self.market.batch_snapshots_swing(
+                symbols=scan_symbols,
+                swing_interval=self.cfg.swing_interval,
+                swing_limit=self.cfg.swing_kline_limit,
+                trend_interval=self.cfg.swing_trend_interval,
+                trend_limit=self.cfg.swing_trend_limit,
+                concurrency=3,
+            )
+
+            swing_signals = self.strategy.generate_swing_signals(
+                snapshots=swing_snaps,
+                open_positions=open_positions,
+                risk_state=risk_state.value,
+            )
+
+            log.info(
+                "swing cycle",
+                extra={
+                    "scanned": len(scan_symbols),
+                    "snapshots": len(swing_snaps),
+                    "signals": len(swing_signals),
+                },
+            )
+            return swing_signals
+        except Exception as exc:
+            log.warning("swing cycle error", extra={"error": str(exc)})
+            return []
 
     def _dynamic_leverage(self, sig: Any) -> int | None:
         """Compute leverage tier based on confluence/score."""

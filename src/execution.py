@@ -31,14 +31,23 @@ from src.universe import Universe
 log = get_logger(__name__)
 
 
-def _compute_tp_sl_bps(cfg: Settings, snap: SymbolSnapshot, entry_price: float) -> tuple[float, float]:
-    """Compute SL/TP bps (ATR-based when enabled)."""
+def _compute_tp_sl_bps(
+    cfg: Settings, snap: SymbolSnapshot, entry_price: float,
+    trade_type: str = "scalp",
+) -> tuple[float, float]:
+    """Compute SL/TP bps (ATR-based when enabled). Swing uses wider values."""
+    is_swing = trade_type == "swing"
+    base_sl = cfg.swing_sl_bps if is_swing else cfg.sl_bps
+    base_tp = cfg.swing_tp_bps if is_swing else cfg.tp_bps
+    atr_sl_mult = cfg.swing_atr_sl_multiplier if is_swing else cfg.atr_sl_multiplier
+    atr_tp_mult = cfg.swing_atr_tp_multiplier if is_swing else cfg.atr_tp_multiplier
+
     if cfg.use_dynamic_tp_sl and snap.indicators.atr > 0 and entry_price > 0:
         atr_bps = (snap.indicators.atr / entry_price) * 10_000
-        sl_bps = max(atr_bps * cfg.atr_sl_multiplier, cfg.min_sl_bps)
-        tp_bps = max(atr_bps * cfg.atr_tp_multiplier, cfg.min_tp_bps)
+        sl_bps = max(atr_bps * atr_sl_mult, cfg.min_sl_bps)
+        tp_bps = max(atr_bps * atr_tp_mult, cfg.min_tp_bps)
         return sl_bps, tp_bps
-    return cfg.sl_bps, cfg.tp_bps
+    return base_sl, base_tp
 
 
 def _estimate_liquidation_price(
@@ -230,7 +239,7 @@ class PaperExecution(ExecutionAdapter):
         )
 
         # ── Compute SL / TP prices ──────────────────────────────
-        sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, fill_price)
+        sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, fill_price, getattr(signal, "trade_type", "scalp"))
         if signal.side == "LONG":
             sl_price = fill_price * (1 - sl_bps / 10_000)
             tp_price = fill_price * (1 + tp_bps / 10_000)
@@ -354,6 +363,11 @@ class PaperExecution(ExecutionAdapter):
                 "opened_at": now,
                 "status": "OPEN",
                 "is_paper": 1,
+                "trade_type": getattr(signal, "trade_type", "scalp"),
+                "max_hold_minutes": (
+                    self.cfg.swing_max_hold_minutes if getattr(signal, "trade_type", "scalp") == "swing"
+                    else self.cfg.max_hold_minutes
+                ),
             },
         )
 
@@ -506,15 +520,19 @@ class PaperExecution(ExecutionAdapter):
                 self._update_sl_order_price(pos, side, new_sl)
 
             # ── NEW: Time-decay SL tightening ────────────────────
+            pos_max_hold = int(pos.get("max_hold_minutes") or 0) or (
+                self.cfg.swing_max_hold_minutes if pos.get("trade_type") == "swing"
+                else self.cfg.max_hold_minutes
+            )
             if self.cfg.use_time_decay_sl and not exit_reason:
                 opened = datetime.fromisoformat(pos["opened_at"])
                 if opened.tzinfo is None:
                     opened = opened.replace(tzinfo=timezone.utc)
                 elapsed_min = (now - opened).total_seconds() / 60
-                decay_start = self.cfg.max_hold_minutes * self.cfg.time_decay_start_pct
+                decay_start = pos_max_hold * self.cfg.time_decay_start_pct
                 if elapsed_min > decay_start and profit_bps < 0:
                     # Progressively tighten SL as position ages while in loss
-                    decay_progress = min(1.0, (elapsed_min - decay_start) / (self.cfg.max_hold_minutes - decay_start))
+                    decay_progress = min(1.0, (elapsed_min - decay_start) / (pos_max_hold - decay_start))
                     reduction = sl_bps * self.cfg.time_decay_sl_reduction_pct * decay_progress
                     tightened_sl_bps = max(sl_bps * 0.3, sl_bps - reduction)  # never less than 30% of original
                     if side == "LONG":
@@ -569,7 +587,7 @@ class PaperExecution(ExecutionAdapter):
                 if opened.tzinfo is None:
                     opened = opened.replace(tzinfo=timezone.utc)
                 elapsed_min = (now - opened).total_seconds() / 60
-                if elapsed_min >= self.cfg.max_hold_minutes:
+                if elapsed_min >= pos_max_hold:
                     exit_reason = "TIMEOUT"
 
             if exit_reason:
@@ -962,7 +980,7 @@ class LiveExecution(ExecutionAdapter):
         notional = avg_price * filled_qty
         close_side = "SELL" if signal.side == "LONG" else "BUY"
 
-        sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, avg_price)
+        sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, avg_price, getattr(signal, "trade_type", "scalp"))
         if signal.side == "LONG":
             sl_price = avg_price * (1 - sl_bps / 10_000)
             tp_price = avg_price * (1 + tp_bps / 10_000)
@@ -1170,6 +1188,11 @@ class LiveExecution(ExecutionAdapter):
                 "opened_at": now,
                 "status": "OPEN",
                 "is_paper": 0,
+                "trade_type": getattr(signal, "trade_type", "scalp"),
+                "max_hold_minutes": (
+                    self.cfg.swing_max_hold_minutes if getattr(signal, "trade_type", "scalp") == "swing"
+                    else self.cfg.max_hold_minutes
+                ),
             },
         )
 
@@ -1355,14 +1378,18 @@ class LiveExecution(ExecutionAdapter):
                 await self._update_live_sl(pos, side, exch_qty, new_sl)
 
             # Time-decay SL tightening (live)
+            live_max_hold = int(pos.get("max_hold_minutes") or 0) or (
+                self.cfg.swing_max_hold_minutes if pos.get("trade_type") == "swing"
+                else self.cfg.max_hold_minutes
+            )
             if self.cfg.use_time_decay_sl:
                 opened_td = datetime.fromisoformat(pos["opened_at"])
                 if opened_td.tzinfo is None:
                     opened_td = opened_td.replace(tzinfo=timezone.utc)
                 elapsed_td = (now - opened_td).total_seconds() / 60
-                decay_start = self.cfg.max_hold_minutes * self.cfg.time_decay_start_pct
+                decay_start = live_max_hold * self.cfg.time_decay_start_pct
                 if elapsed_td > decay_start and profit_bps < 0:
-                    decay_progress = min(1.0, (elapsed_td - decay_start) / (self.cfg.max_hold_minutes - decay_start))
+                    decay_progress = min(1.0, (elapsed_td - decay_start) / (live_max_hold - decay_start))
                     reduction = sl_bps * self.cfg.time_decay_sl_reduction_pct * decay_progress
                     tightened_sl_bps = max(sl_bps * 0.3, sl_bps - reduction)
                     if side == "LONG":
@@ -1411,7 +1438,7 @@ class LiveExecution(ExecutionAdapter):
             opened = datetime.fromisoformat(pos["opened_at"])
             if opened.tzinfo is None:
                 opened = opened.replace(tzinfo=timezone.utc)
-            if (now - opened).total_seconds() / 60 >= self.cfg.max_hold_minutes:
+            if (now - opened).total_seconds() / 60 >= live_max_hold:
                 try:
                     close_side = "SELL" if side == "LONG" else "BUY"
                     await self.client.place_order(
