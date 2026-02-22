@@ -68,6 +68,9 @@ class Indicators:
     recent_high: float = 0.0          # highest close in last 10 bars
     recent_low: float = 0.0           # lowest close in last 10 bars
     price_position_pct: float = 0.5   # where price sits in recent range (0=low, 1=high)
+    # ── Stochastic RSI ──
+    stoch_rsi_k: float = 50.0   # %K line (0-100), <20 oversold, >80 overbought
+    stoch_rsi_d: float = 50.0   # %D signal line (smoothed %K)
     # ── RSI Divergence ──
     rsi_bullish_divergence: bool = False  # price new low but RSI higher low → reversal LONG
     rsi_bearish_divergence: bool = False  # price new high but RSI lower high → reversal SHORT
@@ -339,6 +342,12 @@ class MarketData:
             ind.rsi_bullish_divergence = div_result[0]
             ind.rsi_bearish_divergence = div_result[1]
 
+        # ── Stochastic RSI ──
+        if len(closes) >= self.cfg.rsi_period + 20:
+            stoch_k, stoch_d = self._compute_stochastic_rsi(closes, self.cfg.rsi_period)
+            ind.stoch_rsi_k = stoch_k
+            ind.stoch_rsi_d = stoch_d
+
         ind.valid = True
         return ind
 
@@ -561,6 +570,75 @@ class MarketData:
 
         return bullish, bearish
 
+    @staticmethod
+    def _compute_stochastic_rsi(
+        closes: list[float], rsi_period: int = 14,
+        stoch_period: int = 14, smooth_k: int = 3, smooth_d: int = 3,
+    ) -> tuple[float, float]:
+        """Compute Stochastic RSI (%K smoothed, %D).
+
+        StochRSI applies a stochastic oscillator to RSI values,
+        making it more sensitive than RSI alone for overbought/oversold.
+        Returns (%K, %D) both in 0-100 range.
+        """
+        needed = rsi_period + stoch_period + smooth_k + smooth_d + 5
+        if len(closes) < needed:
+            return 50.0, 50.0
+
+        # Build RSI series incrementally (efficient: O(n))
+        gains: list[float] = []
+        losses_l: list[float] = []
+        for i in range(1, len(closes)):
+            diff = closes[i] - closes[i - 1]
+            gains.append(max(diff, 0))
+            losses_l.append(max(-diff, 0))
+
+        if len(gains) < rsi_period:
+            return 50.0, 50.0
+
+        avg_gain = sum(gains[:rsi_period]) / rsi_period
+        avg_loss = sum(losses_l[:rsi_period]) / rsi_period
+
+        rsi_series: list[float] = []
+        for i in range(rsi_period, len(gains)):
+            avg_gain = (avg_gain * (rsi_period - 1) + gains[i]) / rsi_period
+            avg_loss = (avg_loss * (rsi_period - 1) + losses_l[i]) / rsi_period
+            if avg_loss == 0:
+                rsi_series.append(100.0)
+            else:
+                rs = avg_gain / avg_loss
+                rsi_series.append(100 - (100 / (1 + rs)))
+
+        n_rsi_needed = stoch_period + smooth_k + smooth_d
+        if len(rsi_series) < n_rsi_needed:
+            return 50.0, 50.0
+
+        # Stochastic of RSI values
+        stoch_raw: list[float] = []
+        for i in range(stoch_period - 1, len(rsi_series)):
+            window = rsi_series[i - stoch_period + 1: i + 1]
+            lo = min(window)
+            hi = max(window)
+            if hi - lo > 0:
+                stoch_raw.append(((rsi_series[i] - lo) / (hi - lo)) * 100)
+            else:
+                stoch_raw.append(50.0)
+
+        if len(stoch_raw) < smooth_k:
+            return 50.0, 50.0
+
+        # Smooth %K with SMA
+        k_smoothed: list[float] = []
+        for i in range(smooth_k - 1, len(stoch_raw)):
+            k_smoothed.append(sum(stoch_raw[i - smooth_k + 1: i + 1]) / smooth_k)
+
+        if len(k_smoothed) < smooth_d:
+            return k_smoothed[-1] if k_smoothed else 50.0, 50.0
+
+        # %D = SMA of smoothed %K
+        d_val = sum(k_smoothed[-smooth_d:]) / smooth_d
+        return k_smoothed[-1], d_val
+
     # ── Running EMA (per-tick, for z-score) ────────────────────
 
     def update_ema(self, symbol: str, price: float) -> tuple[float, float, float]:
@@ -590,7 +668,7 @@ class MarketData:
 
         # Fetch in parallel: depth, premium index (mark + funding), klines (+ optional higher TF)
         tasks: list = []
-        need_higher_tf = self.cfg.use_higher_tf_trend and self.cfg.require_higher_tf_alignment
+        need_higher_tf = self.cfg.use_higher_tf_trend
         if fetch_depth:
             tasks.append(self.fetch_depth(symbol))
         tasks.append(self.fetch_premium_index(symbol))

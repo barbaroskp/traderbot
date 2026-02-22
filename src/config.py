@@ -131,6 +131,11 @@ class Settings(BaseSettings):
     weight_volume_spike: float = 5.0
     weight_vwap: float = 10.0
     weight_momentum: float = 10.0
+    weight_stoch_rsi: float = 15.0
+    weight_adx: float = 10.0
+    stoch_rsi_oversold: float = 20.0
+    stoch_rsi_overbought: float = 80.0
+    higher_tf_alignment_bonus: float = 15.0  # weighted score bonus when 15m trend confirms signal
 
     # ── Momentum Quality Filter ──────────────────────────────
     require_momentum_confirmation: bool = True
