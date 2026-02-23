@@ -289,6 +289,16 @@ class Strategy:
                (side == "SHORT" and indicators.higher_tf_trend == "DOWN"):
                 weighted_score += self.cfg.higher_tf_alignment_bonus
 
+        # ── Optional 1h TF alignment bonus ──
+        if (
+            self.cfg.use_hourly_tf_alignment
+            and self.cfg.hourly_tf_alignment_bonus > 0
+            and indicators.hourly_tf_trend != "NEUTRAL"
+        ):
+            if (side == "LONG" and indicators.hourly_tf_trend == "UP") or \
+               (side == "SHORT" and indicators.hourly_tf_trend == "DOWN"):
+                weighted_score += self.cfg.hourly_tf_alignment_bonus
+
         # Check momentum confirmation
         momentum_confirmed = self._check_momentum(indicators, side)
 
@@ -791,13 +801,13 @@ class Strategy:
             votes.append(IndicatorVote(
                 name="taker_ratio", side="LONG", weight=cfg.weight_taker_ratio,
                 value=taker,
-                reason=f"taker buy ratio {taker:.2f} >= {cfg.taker_buy_ratio_long} (buy pressure)",
+                reason=f"taker buy ratio {taker:.2f} >= {cfg.taker_buy_ratio_long} (buy pressure, {indicators.taker_data_source})",
             ))
         elif taker <= cfg.taker_buy_ratio_short:
             votes.append(IndicatorVote(
                 name="taker_ratio", side="SHORT", weight=cfg.weight_taker_ratio,
                 value=taker,
-                reason=f"taker buy ratio {taker:.2f} <= {cfg.taker_buy_ratio_short} (sell pressure)",
+                reason=f"taker buy ratio {taker:.2f} <= {cfg.taker_buy_ratio_short} (sell pressure, {indicators.taker_data_source})",
             ))
 
         # 14. OBV vote (volume flow direction + divergence)

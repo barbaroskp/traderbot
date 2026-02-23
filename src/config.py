@@ -136,9 +136,15 @@ class Settings(BaseSettings):
     stoch_rsi_oversold: float = 20.0
     stoch_rsi_overbought: float = 80.0
     higher_tf_alignment_bonus: float = 15.0  # weighted score bonus when 15m trend confirms signal
+    hourly_tf_interval: str = "1h"
+    hourly_tf_limit: int = 50
+    use_hourly_tf_alignment: bool = True
+    hourly_tf_alignment_bonus: float = 10.0
 
     # ── New Indicators (Tier 1+2) ─────────────────────────────
     # Taker Buy/Sell Ratio (proxy from candle direction)
+    use_real_taker_data: bool = True
+    taker_trades_limit: int = 200
     weight_taker_ratio: float = 15.0
     taker_buy_ratio_long: float = 0.58   # >58% taker buys = bullish
     taker_buy_ratio_short: float = 0.42  # <42% taker buys = bearish

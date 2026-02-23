@@ -326,6 +326,21 @@ class BingXClient:
         )
         return data.get("data", [])
 
+    async def get_recent_trades(self, symbol: str, limit: int = 200) -> list[dict[str, Any]]:
+        """Recent public trades for a symbol.
+
+        Note: endpoint support can vary by exchange deployment; callers should handle
+        BingXClientError and gracefully fall back.
+        """
+        data = await self._request(
+            "GET",
+            "/openApi/swap/v2/quote/trades",
+            params={"symbol": symbol, "limit": limit},
+            signed=False,
+        )
+        result = data.get("data", [])
+        return result if isinstance(result, list) else []
+
     # ── Trading ─────────────────────────────────────────────────
 
     async def place_order(

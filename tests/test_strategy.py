@@ -571,3 +571,26 @@ class TestSwingSignals:
         signals = strat.generate_signals([snap], [])
         if signals:
             assert signals[0].trade_type == "scalp"
+
+
+def test_hourly_tf_alignment_bonus_applied(strategy_cfg, db) -> None:
+    strategy_cfg.use_hourly_tf_alignment = True
+    strategy_cfg.hourly_tf_alignment_bonus = 9.0
+    strategy_cfg.higher_tf_alignment_bonus = 0.0
+    strategy_cfg.use_funding_filter = False
+    st = Strategy(strategy_cfg, db)
+
+    snap_up = _make_snap(
+        "BTC-USDT", z=-35, rsi=25, macd_hist=0.001, macd_hist_prev=-0.001, bb_pct=0.1, trend="UP"
+    )
+    snap_up.indicators.hourly_tf_trend = "UP"
+
+    snap_neutral = _make_snap(
+        "ETH-USDT", z=-35, rsi=25, macd_hist=0.001, macd_hist_prev=-0.001, bb_pct=0.1, trend="UP"
+    )
+    snap_neutral.indicators.hourly_tf_trend = "NEUTRAL"
+
+    sig_up = st.generate_signals([snap_up], [])
+    sig_neutral = st.generate_signals([snap_neutral], [])
+    assert sig_up and sig_neutral
+    assert sig_up[0].weighted_score == pytest.approx(sig_neutral[0].weighted_score + 9.0)

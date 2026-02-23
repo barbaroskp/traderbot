@@ -74,8 +74,9 @@ class Indicators:
     # ── RSI Divergence ──
     rsi_bullish_divergence: bool = False  # price new low but RSI higher low → reversal LONG
     rsi_bearish_divergence: bool = False  # price new high but RSI lower high → reversal SHORT
-    # ── Taker Buy/Sell Ratio (proxy from candle direction) ──
+    # ── Taker Buy/Sell Ratio ──
     taker_buy_ratio: float = 0.5  # 0-1, >0.5 = more buy pressure
+    taker_data_source: str = "proxy"  # proxy | real_trades
     # ── OBV (On-Balance Volume) ──
     obv: float = 0.0
     obv_slope: float = 0.0  # normalized OBV trend direction
@@ -93,6 +94,8 @@ class Indicators:
     # ── Price Velocity / Acceleration ──
     price_velocity_bps: float = 0.0  # avg bps change per bar
     price_acceleration: float = 0.0  # change in velocity
+    # ── Optional 1h trend confirmation ──
+    hourly_tf_trend: str = "NEUTRAL"
 
 
 @dataclass
@@ -232,6 +235,45 @@ class MarketData:
         except (BingXClientError, ValueError, TypeError) as exc:
             log.debug("open interest fetch failed", extra={"symbol": symbol, "error": str(exc)})
             return 0.0, 0.0
+
+    async def fetch_taker_buy_ratio_real(self, symbol: str) -> float | None:
+        """Fetch real taker buy ratio from recent trades (if endpoint is available)."""
+        if not self.cfg.use_real_taker_data:
+            return None
+        try:
+            trades = await self.client.get_recent_trades(symbol, limit=self.cfg.taker_trades_limit)
+        except BingXClientError as exc:
+            log.debug("real taker trades fetch failed", extra={"symbol": symbol, "error": str(exc)})
+            return None
+
+        if not trades:
+            return None
+
+        buy_vol = 0.0
+        total_vol = 0.0
+        for tr in trades:
+            qty_raw = tr.get("qty", tr.get("quantity", tr.get("size", 0)))
+            try:
+                qty = float(qty_raw)
+            except (TypeError, ValueError):
+                continue
+            if qty <= 0:
+                continue
+            is_buyer_maker = tr.get("isBuyerMaker")
+            if is_buyer_maker is None:
+                continue
+            if isinstance(is_buyer_maker, str):
+                ibm = is_buyer_maker.strip().lower() in {"true", "1", "yes"}
+            else:
+                ibm = bool(is_buyer_maker)
+            total_vol += qty
+            # Binance/BingX convention: True => buyer is maker => seller is taker
+            if not ibm:
+                buy_vol += qty
+
+        if total_vol <= 0:
+            return None
+        return buy_vol / total_vol
 
     # ── Kline + Indicators ─────────────────────────────────────
 
@@ -921,15 +963,21 @@ class MarketData:
         # Fetch in parallel: depth, premium index (mark + funding), klines (+ optional higher TF + OI)
         tasks: list = []
         need_higher_tf = self.cfg.use_higher_tf_trend
+        need_hourly_tf = self.cfg.use_hourly_tf_alignment
         need_oi = self.cfg.use_open_interest
+        need_real_taker = self.cfg.use_real_taker_data
         if fetch_depth:
             tasks.append(self.fetch_depth(symbol))
         tasks.append(self.fetch_premium_index(symbol))
         tasks.append(self.fetch_klines(symbol))
         if need_higher_tf:
             tasks.append(self.fetch_klines_higher_tf(symbol))
+        if need_hourly_tf:
+            tasks.append(self.fetch_klines_custom(symbol, self.cfg.hourly_tf_interval, self.cfg.hourly_tf_limit))
         if need_oi:
             tasks.append(self.fetch_open_interest(symbol))
+        if need_real_taker:
+            tasks.append(self.fetch_taker_buy_ratio_real(symbol))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -973,12 +1021,28 @@ class MarketData:
                 snap.indicators.higher_tf_trend = higher_ind.trend_direction
             idx += 1
 
+        # Optional 1h TF trend
+        if need_hourly_tf:
+            hourly_result = results[idx]
+            if not isinstance(hourly_result, Exception) and isinstance(hourly_result, list):
+                hourly_ind = self.compute_indicators(hourly_result)
+                snap.indicators.hourly_tf_trend = hourly_ind.trend_direction
+            idx += 1
+
         # Open Interest
         if need_oi:
             oi_result = results[idx]
             if not isinstance(oi_result, Exception) and isinstance(oi_result, tuple):
                 snap.indicators.open_interest = oi_result[0]
                 snap.indicators.oi_change_pct = oi_result[1]
+            idx += 1
+
+        # Real taker ratio (preferred over kline proxy when available)
+        if need_real_taker:
+            taker_result = results[idx]
+            if not isinstance(taker_result, Exception) and isinstance(taker_result, float):
+                snap.indicators.taker_buy_ratio = max(0.0, min(1.0, taker_result))
+                snap.indicators.taker_data_source = "real_trades"
             idx += 1
 
         # Use kline-based EMA as primary (reliable, no warmup bug)
@@ -1039,6 +1103,8 @@ class MarketData:
         ]
         if self.cfg.use_open_interest:
             tasks.append(self.fetch_open_interest(symbol))
+        if self.cfg.use_real_taker_data:
+            tasks.append(self.fetch_taker_buy_ratio_real(symbol))
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Depth
@@ -1076,11 +1142,20 @@ class MarketData:
             snap.indicators.higher_tf_trend = trend_ind.trend_direction
 
         # Open Interest (swing)
+        idx = 4
         if self.cfg.use_open_interest:
-            oi_result = results[4]
+            oi_result = results[idx]
             if not isinstance(oi_result, Exception) and isinstance(oi_result, tuple):
                 snap.indicators.open_interest = oi_result[0]
                 snap.indicators.oi_change_pct = oi_result[1]
+            idx += 1
+
+        # Real taker (swing)
+        if self.cfg.use_real_taker_data and idx < len(results):
+            taker_result = results[idx]
+            if not isinstance(taker_result, Exception) and isinstance(taker_result, float):
+                snap.indicators.taker_buy_ratio = max(0.0, min(1.0, taker_result))
+                snap.indicators.taker_data_source = "real_trades"
 
         # EMA from swing klines
         if snap.indicators.valid and snap.indicators.kline_fast_ema > 0:
