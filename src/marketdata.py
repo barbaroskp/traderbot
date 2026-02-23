@@ -74,6 +74,25 @@ class Indicators:
     # ── RSI Divergence ──
     rsi_bullish_divergence: bool = False  # price new low but RSI higher low → reversal LONG
     rsi_bearish_divergence: bool = False  # price new high but RSI lower high → reversal SHORT
+    # ── Taker Buy/Sell Ratio (proxy from candle direction) ──
+    taker_buy_ratio: float = 0.5  # 0-1, >0.5 = more buy pressure
+    # ── OBV (On-Balance Volume) ──
+    obv: float = 0.0
+    obv_slope: float = 0.0  # normalized OBV trend direction
+    obv_divergence_bullish: bool = False  # price lower low, OBV higher low
+    obv_divergence_bearish: bool = False  # price higher high, OBV lower high
+    # ── Williams %R ──
+    williams_r: float = -50.0  # -100 to 0; <-80 oversold, >-20 overbought
+    # ── Keltner Channels / TTM Squeeze ──
+    keltner_upper: float = 0.0
+    keltner_lower: float = 0.0
+    squeeze_on: bool = False  # BB inside KC = low vol squeeze (breakout imminent)
+    # ── Open Interest ──
+    open_interest: float = 0.0
+    oi_change_pct: float = 0.0  # % change vs previous snapshot
+    # ── Price Velocity / Acceleration ──
+    price_velocity_bps: float = 0.0  # avg bps change per bar
+    price_acceleration: float = 0.0  # change in velocity
 
 
 @dataclass
@@ -112,6 +131,7 @@ class MarketData:
         self.client = client
         self.db = db
         self._ema_states: dict[str, EMAState] = {}
+        self._prev_oi: dict[str, float] = {}  # previous open interest per symbol
 
     def get_ema_state(self, symbol: str) -> EMAState:
         if symbol not in self._ema_states:
@@ -191,6 +211,28 @@ class MarketData:
         except ValueError:
             return 0.0
 
+    # ── Open Interest ──────────────────────────────────────────
+
+    async def fetch_open_interest(self, symbol: str) -> tuple[float, float]:
+        """Fetch open interest and compute change vs previous snapshot.
+
+        Returns (oi_value, oi_change_pct).
+        """
+        if not self.cfg.use_open_interest:
+            return 0.0, 0.0
+        try:
+            raw = await self.client.get_open_interest(symbol)
+            oi = float(raw.get("openInterest", 0))
+            prev = self._prev_oi.get(symbol, 0.0)
+            change_pct = 0.0
+            if prev > 0 and oi > 0:
+                change_pct = ((oi - prev) / prev) * 100.0
+            self._prev_oi[symbol] = oi
+            return oi, change_pct
+        except (BingXClientError, ValueError, TypeError) as exc:
+            log.debug("open interest fetch failed", extra={"symbol": symbol, "error": str(exc)})
+            return 0.0, 0.0
+
     # ── Kline + Indicators ─────────────────────────────────────
 
     async def fetch_klines(self, symbol: str) -> list[dict[str, Any]]:
@@ -239,19 +281,22 @@ class MarketData:
         if not klines or len(klines) < 50:
             return ind
 
-        # Extract close/high/low prices and volumes
+        # Extract close/high/low/open prices and volumes
         closes: list[float] = []
+        opens: list[float] = []
         highs: list[float] = []
         lows: list[float] = []
         volumes: list[float] = []
         for k in klines:
             try:
                 c = float(k.get("close", k.get("c", 0)))
+                o = float(k.get("open", k.get("o", 0)))
                 h = float(k.get("high", k.get("h", 0)))
                 l = float(k.get("low", k.get("l", 0)))
                 v = float(k.get("volume", k.get("v", 0)))
                 if c > 0 and h > 0 and l > 0:
                     closes.append(c)
+                    opens.append(o if o > 0 else c)
                     highs.append(h)
                     lows.append(l)
                     volumes.append(v)
@@ -359,6 +404,43 @@ class MarketData:
             stoch_k, stoch_d = self._compute_stochastic_rsi(closes, self.cfg.rsi_period)
             ind.stoch_rsi_k = stoch_k
             ind.stoch_rsi_d = stoch_d
+
+        # ── Taker Buy/Sell Ratio (proxy from candle direction) ──
+        if len(opens) >= 10 and len(volumes) >= 10:
+            ind.taker_buy_ratio = self._compute_taker_buy_ratio(
+                closes, opens, volumes, self.cfg.taker_ratio_period,
+            )
+
+        # ── OBV + OBV Divergence ──
+        if len(volumes) >= 20:
+            ind.obv, ind.obv_slope = self._compute_obv(closes, volumes)
+            if len(closes) >= 40:
+                ind.obv_divergence_bullish, ind.obv_divergence_bearish = (
+                    self._detect_obv_divergence(closes, volumes)
+                )
+
+        # ── Williams %R ──
+        if len(highs) >= self.cfg.williams_r_period:
+            ind.williams_r = self._compute_williams_r(
+                highs, lows, closes, self.cfg.williams_r_period,
+            )
+
+        # ── Keltner Channels / TTM Squeeze ──
+        if len(closes) >= self.cfg.keltner_period:
+            ind.keltner_upper, ind.keltner_lower = self._compute_keltner(
+                closes, highs, lows,
+                self.cfg.keltner_period, self.cfg.keltner_atr_mult, self.cfg.atr_period,
+            )
+            ind.squeeze_on = self._detect_squeeze(
+                ind.bollinger_upper, ind.bollinger_lower,
+                ind.keltner_upper, ind.keltner_lower,
+            )
+
+        # ── Price Velocity / Acceleration ──
+        if len(closes) >= self.cfg.velocity_lookback + 2:
+            ind.price_velocity_bps, ind.price_acceleration = self._compute_velocity(
+                closes, self.cfg.velocity_lookback,
+            )
 
         ind.valid = True
         return ind
@@ -651,6 +733,164 @@ class MarketData:
         d_val = sum(k_smoothed[-smooth_d:]) / smooth_d
         return k_smoothed[-1], d_val
 
+    # ── Taker Buy/Sell Ratio (proxy from candle direction) ──────
+
+    @staticmethod
+    def _compute_taker_buy_ratio(
+        closes: list[float], opens: list[float], volumes: list[float], period: int = 20,
+    ) -> float:
+        """Proxy taker buy ratio using candle direction * volume.
+
+        Green candle (close >= open) volume counted as buy volume.
+        Red candle volume counted as sell volume.
+        Returns ratio 0-1 where >0.5 = net buying pressure.
+        """
+        n = min(period, len(closes), len(opens), len(volumes))
+        if n < 5:
+            return 0.5
+        total_vol = 0.0
+        buy_vol = 0.0
+        for i in range(-n, 0):
+            vol = volumes[i]
+            total_vol += vol
+            if closes[i] >= opens[i]:  # green candle = buy volume
+                buy_vol += vol
+        return buy_vol / total_vol if total_vol > 0 else 0.5
+
+    # ── OBV (On-Balance Volume) ──────────────────────────────
+
+    @staticmethod
+    def _compute_obv(
+        closes: list[float], volumes: list[float],
+    ) -> tuple[float, float]:
+        """Compute OBV and its normalized slope (5-bar).
+
+        Returns (current_obv, slope).
+        Slope > 0 = accumulation, < 0 = distribution.
+        """
+        if len(closes) < 2 or len(volumes) < 2:
+            return 0.0, 0.0
+        obv = 0.0
+        obv_series: list[float] = [0.0]
+        for i in range(1, len(closes)):
+            if closes[i] > closes[i - 1]:
+                obv += volumes[i]
+            elif closes[i] < closes[i - 1]:
+                obv -= volumes[i]
+            obv_series.append(obv)
+        # Slope over last 5 bars (normalized by avg volume to be scale-independent)
+        lookback = min(5, len(obv_series) - 1)
+        if lookback > 0:
+            avg_vol = sum(volumes[-20:]) / min(20, len(volumes)) if volumes else 1.0
+            slope = (obv_series[-1] - obv_series[-1 - lookback]) / max(avg_vol, 1.0)
+        else:
+            slope = 0.0
+        return obv, slope
+
+    @staticmethod
+    def _detect_obv_divergence(
+        closes: list[float], volumes: list[float], lookback: int = 20,
+    ) -> tuple[bool, bool]:
+        """Detect OBV divergence vs price.
+
+        Bullish: price lower low but OBV higher low → accumulation.
+        Bearish: price higher high but OBV lower high → distribution.
+        Returns (bullish, bearish).
+        """
+        if len(closes) < lookback * 2 or len(volumes) < lookback * 2:
+            return False, False
+        # Build OBV series
+        obv_series = [0.0]
+        for i in range(1, len(closes)):
+            if closes[i] > closes[i - 1]:
+                obv_series.append(obv_series[-1] + volumes[i])
+            elif closes[i] < closes[i - 1]:
+                obv_series.append(obv_series[-1] - volumes[i])
+            else:
+                obv_series.append(obv_series[-1])
+
+        recent_price = closes[-lookback:]
+        prev_price = closes[-lookback * 2 : -lookback]
+        recent_obv = obv_series[-lookback:]
+        prev_obv = obv_series[-lookback * 2 : -lookback]
+
+        bullish = (
+            min(recent_price) < min(prev_price)
+            and min(recent_obv) > min(prev_obv)
+        )
+        bearish = (
+            max(recent_price) > max(prev_price)
+            and max(recent_obv) < max(prev_obv)
+        )
+        return bullish, bearish
+
+    # ── Williams %R ──────────────────────────────────────────
+
+    @staticmethod
+    def _compute_williams_r(
+        highs: list[float], lows: list[float], closes: list[float], period: int = 14,
+    ) -> float:
+        """Williams %R: -100 to 0. <-80 oversold, >-20 overbought."""
+        if len(closes) < period or len(highs) < period or len(lows) < period:
+            return -50.0
+        highest = max(highs[-period:])
+        lowest = min(lows[-period:])
+        if highest == lowest:
+            return -50.0
+        return ((highest - closes[-1]) / (highest - lowest)) * -100.0
+
+    # ── Keltner Channels / TTM Squeeze ───────────────────────
+
+    @staticmethod
+    def _compute_keltner(
+        closes: list[float], highs: list[float], lows: list[float],
+        period: int = 20, atr_mult: float = 1.5, atr_period: int = 14,
+    ) -> tuple[float, float]:
+        """Keltner Channel upper/lower bands = EMA ± ATR * mult."""
+        if len(closes) < max(period, atr_period + 1):
+            return 0.0, 0.0
+        ema = MarketData._compute_ema_single(closes, period)
+        atr = MarketData._compute_atr(highs, lows, closes, atr_period)
+        return ema + atr_mult * atr, ema - atr_mult * atr
+
+    @staticmethod
+    def _detect_squeeze(
+        bb_upper: float, bb_lower: float, kc_upper: float, kc_lower: float,
+    ) -> bool:
+        """TTM Squeeze: BB inside KC = low volatility, breakout imminent."""
+        if kc_upper <= 0 or kc_lower <= 0:
+            return False
+        return bb_lower > kc_lower and bb_upper < kc_upper
+
+    # ── Price Velocity / Acceleration ────────────────────────
+
+    @staticmethod
+    def _compute_velocity(
+        closes: list[float], lookback: int = 5,
+    ) -> tuple[float, float]:
+        """Price velocity (avg bps/bar) and acceleration.
+
+        Velocity > 0 = rising, < 0 = falling.
+        Acceleration > 0 = speeding up, < 0 = slowing down.
+        """
+        if len(closes) < lookback + 2:
+            return 0.0, 0.0
+        changes: list[float] = []
+        for i in range(-lookback, 0):
+            if closes[i - 1] > 0:
+                changes.append(((closes[i] - closes[i - 1]) / closes[i - 1]) * 10_000)
+        velocity = sum(changes) / len(changes) if changes else 0.0
+        # Acceleration = current velocity vs previous period velocity
+        acceleration = 0.0
+        if len(closes) >= lookback * 2 + 2:
+            prev_changes: list[float] = []
+            for i in range(-lookback * 2, -lookback):
+                if closes[i - 1] > 0:
+                    prev_changes.append(((closes[i] - closes[i - 1]) / closes[i - 1]) * 10_000)
+            prev_velocity = sum(prev_changes) / len(prev_changes) if prev_changes else 0.0
+            acceleration = velocity - prev_velocity
+        return velocity, acceleration
+
     # ── Running EMA (per-tick, for z-score) ────────────────────
 
     def update_ema(self, symbol: str, price: float) -> tuple[float, float, float]:
@@ -678,15 +918,18 @@ class MarketData:
         snap = SymbolSnapshot(symbol=symbol)
         snap.ts = datetime.now(timezone.utc).isoformat()
 
-        # Fetch in parallel: depth, premium index (mark + funding), klines (+ optional higher TF)
+        # Fetch in parallel: depth, premium index (mark + funding), klines (+ optional higher TF + OI)
         tasks: list = []
         need_higher_tf = self.cfg.use_higher_tf_trend
+        need_oi = self.cfg.use_open_interest
         if fetch_depth:
             tasks.append(self.fetch_depth(symbol))
         tasks.append(self.fetch_premium_index(symbol))
         tasks.append(self.fetch_klines(symbol))
         if need_higher_tf:
             tasks.append(self.fetch_klines_higher_tf(symbol))
+        if need_oi:
+            tasks.append(self.fetch_open_interest(symbol))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -728,6 +971,14 @@ class MarketData:
             if not isinstance(higher_result, Exception) and isinstance(higher_result, list):
                 higher_ind = self.compute_indicators(higher_result)
                 snap.indicators.higher_tf_trend = higher_ind.trend_direction
+            idx += 1
+
+        # Open Interest
+        if need_oi:
+            oi_result = results[idx]
+            if not isinstance(oi_result, Exception) and isinstance(oi_result, tuple):
+                snap.indicators.open_interest = oi_result[0]
+                snap.indicators.oi_change_pct = oi_result[1]
             idx += 1
 
         # Use kline-based EMA as primary (reliable, no warmup bug)
@@ -786,6 +1037,8 @@ class MarketData:
             self.fetch_klines_custom(symbol, swing_interval, swing_limit),
             self.fetch_klines_custom(symbol, trend_interval, trend_limit),
         ]
+        if self.cfg.use_open_interest:
+            tasks.append(self.fetch_open_interest(symbol))
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Depth
@@ -821,6 +1074,13 @@ class MarketData:
         if not isinstance(trend_klines, Exception) and isinstance(trend_klines, list):
             trend_ind = self.compute_indicators(trend_klines)
             snap.indicators.higher_tf_trend = trend_ind.trend_direction
+
+        # Open Interest (swing)
+        if self.cfg.use_open_interest:
+            oi_result = results[4]
+            if not isinstance(oi_result, Exception) and isinstance(oi_result, tuple):
+                snap.indicators.open_interest = oi_result[0]
+                snap.indicators.oi_change_pct = oi_result[1]
 
         # EMA from swing klines
         if snap.indicators.valid and snap.indicators.kline_fast_ema > 0:

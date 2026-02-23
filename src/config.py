@@ -137,6 +137,37 @@ class Settings(BaseSettings):
     stoch_rsi_overbought: float = 80.0
     higher_tf_alignment_bonus: float = 15.0  # weighted score bonus when 15m trend confirms signal
 
+    # ── New Indicators (Tier 1+2) ─────────────────────────────
+    # Taker Buy/Sell Ratio (proxy from candle direction)
+    weight_taker_ratio: float = 15.0
+    taker_buy_ratio_long: float = 0.58   # >58% taker buys = bullish
+    taker_buy_ratio_short: float = 0.42  # <42% taker buys = bearish
+    taker_ratio_period: int = 20
+
+    # OBV (On-Balance Volume)
+    weight_obv: float = 10.0
+
+    # Williams %R
+    weight_williams_r: float = 10.0
+    williams_r_period: int = 14
+    williams_r_oversold: float = -80.0   # below = oversold -> LONG
+    williams_r_overbought: float = -20.0 # above = overbought -> SHORT
+
+    # TTM Squeeze (Keltner Channels + Bollinger)
+    weight_squeeze: float = 15.0
+    keltner_period: int = 20
+    keltner_atr_mult: float = 1.5
+
+    # Open Interest
+    use_open_interest: bool = True
+    weight_oi: float = 15.0
+    oi_change_threshold_pct: float = 3.0  # % OI change that triggers a vote
+
+    # Price Velocity / Acceleration
+    weight_velocity: float = 5.0
+    velocity_lookback: int = 5
+    velocity_threshold_bps: float = 30.0  # min velocity bps/bar to count
+
     # ── Momentum Quality Filter ──────────────────────────────
     require_momentum_confirmation: bool = True
     momentum_bonus_weight: float = 10.0

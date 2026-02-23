@@ -1,6 +1,6 @@
 """Multi-indicator confluence strategy – optimized for maximum profitability.
 
-Signal generation uses 12 independent indicators that each "vote" for LONG, SHORT, or NEUTRAL.
+Signal generation uses 18 independent indicators that each "vote" for LONG, SHORT, or NEUTRAL.
 A trade is only taken when enough indicators agree (confluence).
 
 Indicators:
@@ -16,6 +16,12 @@ Indicators:
   10. RSI Divergence: Price/RSI divergence reversal signals (1.5x RSI weight)
   11. Stochastic RSI: More sensitive overbought/oversold via stochastic of RSI
   12. ADX Strength: Directional movement confirms trend (+DI vs -DI)
+  13. Taker Buy/Sell Ratio: Net buying/selling pressure from candle direction
+  14. OBV (On-Balance Volume): Cumulative volume flow + divergence detection
+  15. Williams %R: Short-term overbought/oversold oscillator
+  16. TTM Squeeze: Bollinger inside Keltner = low vol breakout imminent
+  17. Open Interest: OI change + price direction = manipulation detection
+  18. Price Velocity: Rate of price change confirms momentum or warns of reversal
 
 Additional filters & bonuses:
   - Funding time avoidance (±30 min around 00/08/16 UTC)
@@ -778,6 +784,151 @@ class Strategy:
                     value=indicators.adx,
                     reason=f"ADX={indicators.adx:.0f} -DI>{indicators.plus_di:.0f} (strong downtrend)",
                 ))
+
+        # 13. Taker Buy/Sell Ratio vote (net buying/selling pressure)
+        taker = indicators.taker_buy_ratio
+        if taker >= cfg.taker_buy_ratio_long:
+            votes.append(IndicatorVote(
+                name="taker_ratio", side="LONG", weight=cfg.weight_taker_ratio,
+                value=taker,
+                reason=f"taker buy ratio {taker:.2f} >= {cfg.taker_buy_ratio_long} (buy pressure)",
+            ))
+        elif taker <= cfg.taker_buy_ratio_short:
+            votes.append(IndicatorVote(
+                name="taker_ratio", side="SHORT", weight=cfg.weight_taker_ratio,
+                value=taker,
+                reason=f"taker buy ratio {taker:.2f} <= {cfg.taker_buy_ratio_short} (sell pressure)",
+            ))
+
+        # 14. OBV vote (volume flow direction + divergence)
+        if indicators.obv_divergence_bullish:
+            # Strong reversal signal: price lower low but OBV higher low
+            votes.append(IndicatorVote(
+                name="obv", side="LONG", weight=cfg.weight_obv * 1.5,
+                value=indicators.obv_slope,
+                reason="OBV bullish divergence (accumulation despite price drop)",
+            ))
+        elif indicators.obv_divergence_bearish:
+            votes.append(IndicatorVote(
+                name="obv", side="SHORT", weight=cfg.weight_obv * 1.5,
+                value=indicators.obv_slope,
+                reason="OBV bearish divergence (distribution despite price rise)",
+            ))
+        elif indicators.obv_slope > 0.5:
+            votes.append(IndicatorVote(
+                name="obv", side="LONG", weight=cfg.weight_obv,
+                value=indicators.obv_slope,
+                reason=f"OBV rising (slope={indicators.obv_slope:.2f}, accumulation)",
+            ))
+        elif indicators.obv_slope < -0.5:
+            votes.append(IndicatorVote(
+                name="obv", side="SHORT", weight=cfg.weight_obv,
+                value=indicators.obv_slope,
+                reason=f"OBV falling (slope={indicators.obv_slope:.2f}, distribution)",
+            ))
+
+        # 15. Williams %R vote (short-term overbought/oversold)
+        wr = indicators.williams_r
+        if wr <= cfg.williams_r_oversold:
+            votes.append(IndicatorVote(
+                name="williams_r", side="LONG", weight=cfg.weight_williams_r,
+                value=wr,
+                reason=f"Williams %R={wr:.0f} <= {cfg.williams_r_oversold} (oversold)",
+            ))
+        elif wr >= cfg.williams_r_overbought:
+            votes.append(IndicatorVote(
+                name="williams_r", side="SHORT", weight=cfg.weight_williams_r,
+                value=wr,
+                reason=f"Williams %R={wr:.0f} >= {cfg.williams_r_overbought} (overbought)",
+            ))
+
+        # 16. TTM Squeeze vote (BB inside KC = breakout imminent)
+        if indicators.squeeze_on:
+            # Squeeze detected: vote based on momentum direction (velocity)
+            vel = indicators.price_velocity_bps
+            if vel > cfg.velocity_threshold_bps:
+                votes.append(IndicatorVote(
+                    name="squeeze", side="LONG", weight=cfg.weight_squeeze,
+                    value=vel,
+                    reason=f"TTM Squeeze ON + bullish velocity {vel:.1f}bps/bar",
+                ))
+            elif vel < -cfg.velocity_threshold_bps:
+                votes.append(IndicatorVote(
+                    name="squeeze", side="SHORT", weight=cfg.weight_squeeze,
+                    value=vel,
+                    reason=f"TTM Squeeze ON + bearish velocity {vel:.1f}bps/bar",
+                ))
+            else:
+                # Squeeze but no clear direction yet - use MACD histogram direction
+                if indicators.macd_histogram > 0:
+                    votes.append(IndicatorVote(
+                        name="squeeze", side="LONG", weight=cfg.weight_squeeze * 0.5,
+                        value=indicators.macd_histogram,
+                        reason="TTM Squeeze ON + MACD positive (lean bullish)",
+                    ))
+                elif indicators.macd_histogram < 0:
+                    votes.append(IndicatorVote(
+                        name="squeeze", side="SHORT", weight=cfg.weight_squeeze * 0.5,
+                        value=indicators.macd_histogram,
+                        reason="TTM Squeeze ON + MACD negative (lean bearish)",
+                    ))
+
+        # 17. Open Interest vote (manipulation detection)
+        oi_change = indicators.oi_change_pct
+        if abs(oi_change) >= cfg.oi_change_threshold_pct:
+            # OI rising + price rising = genuine rally (LONG confirmed)
+            # OI rising + price falling = shorts opening (bearish) or long trap
+            # OI falling + price rising = short squeeze (caution)
+            # OI falling + price falling = longs closing (bearish confirmed)
+            vel = indicators.price_velocity_bps
+            if oi_change > 0 and vel > 0:
+                # New money entering + price up = genuine bullish
+                votes.append(IndicatorVote(
+                    name="open_interest", side="LONG", weight=cfg.weight_oi,
+                    value=oi_change,
+                    reason=f"OI +{oi_change:.1f}% + price rising (genuine rally)",
+                ))
+            elif oi_change > 0 and vel < 0:
+                # New money entering + price down = bearish pressure building
+                votes.append(IndicatorVote(
+                    name="open_interest", side="SHORT", weight=cfg.weight_oi,
+                    value=oi_change,
+                    reason=f"OI +{oi_change:.1f}% + price falling (shorts entering)",
+                ))
+            elif oi_change < 0 and vel < 0:
+                # Positions closing + price down = longs liquidating (bearish)
+                votes.append(IndicatorVote(
+                    name="open_interest", side="SHORT", weight=cfg.weight_oi * 0.7,
+                    value=oi_change,
+                    reason=f"OI {oi_change:.1f}% + price falling (longs exiting)",
+                ))
+            elif oi_change < 0 and vel > 0:
+                # Positions closing + price up = short squeeze (bullish but caution)
+                votes.append(IndicatorVote(
+                    name="open_interest", side="LONG", weight=cfg.weight_oi * 0.5,
+                    value=oi_change,
+                    reason=f"OI {oi_change:.1f}% + price rising (short squeeze)",
+                ))
+
+        # 18. Price Velocity vote (momentum confirmation / pump-dump detection)
+        vel = indicators.price_velocity_bps
+        if abs(vel) >= cfg.velocity_threshold_bps:
+            accel = indicators.price_acceleration
+            if vel > 0 and accel >= 0:
+                # Rising price + accelerating = strong bullish momentum
+                votes.append(IndicatorVote(
+                    name="velocity", side="LONG", weight=cfg.weight_velocity,
+                    value=vel,
+                    reason=f"velocity +{vel:.1f}bps/bar accel={accel:.1f} (bullish momentum)",
+                ))
+            elif vel < 0 and accel <= 0:
+                # Falling price + accelerating down = strong bearish momentum
+                votes.append(IndicatorVote(
+                    name="velocity", side="SHORT", weight=cfg.weight_velocity,
+                    value=vel,
+                    reason=f"velocity {vel:.1f}bps/bar accel={accel:.1f} (bearish momentum)",
+                ))
+            # Deceleration = potential reversal, don't vote (let other indicators decide)
 
         return votes
 
