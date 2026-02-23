@@ -279,6 +279,16 @@ class BingXClient:
         )
         return data.get("data", {})
 
+    async def get_open_interest(self, symbol: str) -> dict[str, Any]:
+        """Open interest for a symbol."""
+        data = await self._request(
+            "GET",
+            "/openApi/swap/v2/quote/openInterest",
+            params={"symbol": symbol},
+            signed=False,
+        )
+        return data.get("data", {})
+
     async def get_mark_price(self, symbol: str) -> dict[str, Any]:
         """Mark price / premium index."""
         data = await self._request(
