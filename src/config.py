@@ -39,7 +39,7 @@ class Settings(BaseSettings):
 
     # ── Capital (Margin-Based Futures Sizing) ─────────────────
     # Position sizing: margin = balance × fraction, notional = margin × leverage
-    initial_capital_usdt: float = 16.0
+    initial_capital_usdt: float = 20.0
     max_total_margin_usdt: float = 15.0    # max total MARGIN across all positions (was max_total_notional_usdt)
     max_trade_margin_usdt: float = 4.0     # max MARGIN per single trade (was max_trade_notional_usdt)
     per_trade_fraction: float = 0.08       # 8% of balance as MARGIN per trade
