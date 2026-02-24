@@ -12,7 +12,7 @@ class TestConfig:
         cfg = Settings(bingx_api_key="k", bingx_api_secret="s")
         assert cfg.paper_mode is True
         assert cfg.allow_live_trading is False
-        assert cfg.initial_capital_usdt == 50.0
+        assert cfg.initial_capital_usdt == 16.0
         assert cfg.leverage == 5  # aggressive default
         assert cfg.margin_mode == MarginMode.ISOLATED
 
