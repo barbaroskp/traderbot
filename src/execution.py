@@ -611,9 +611,10 @@ class PaperExecution(ExecutionAdapter):
         else:
             pnl = (entry - exit_price) * qty
 
-        # Fee on exit
-        fee = exit_price * qty * (self.cfg.fee_rate_bps / 10_000)
-        pnl -= fee
+        # Fees: entry (on notional at open) + exit (on notional at close)
+        entry_fee = entry * qty * (self.cfg.fee_rate_bps / 10_000)
+        exit_fee = exit_price * qty * (self.cfg.fee_rate_bps / 10_000)
+        pnl -= entry_fee + exit_fee
 
         # Update position
         self.db.execute(
@@ -664,8 +665,9 @@ class PaperExecution(ExecutionAdapter):
         else:
             pnl = (entry - exit_price) * qty_to_close
 
-        fee = exit_price * qty_to_close * (self.cfg.fee_rate_bps / 10_000)
-        pnl -= fee
+        entry_fee = entry * qty_to_close * (self.cfg.fee_rate_bps / 10_000)
+        exit_fee = exit_price * qty_to_close * (self.cfg.fee_rate_bps / 10_000)
+        pnl -= entry_fee + exit_fee
 
         self.db.execute(
             "UPDATE positions SET realised_pnl=realised_pnl + ?, qty=?, remaining_qty=?, "
@@ -1256,6 +1258,9 @@ class LiveExecution(ExecutionAdapter):
                 mark = await self.market.fetch_mark_price(symbol)
                 qty = float(pos.get("remaining_qty", pos["qty"]))
                 pnl = (mark - entry) * qty if side == "LONG" else (entry - mark) * qty
+                entry_fee = entry * qty * (self.cfg.fee_rate_bps / 10_000)
+                exit_fee = mark * qty * (self.cfg.fee_rate_bps / 10_000)
+                pnl -= entry_fee + exit_fee
                 self.db.execute(
                     "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=? WHERE id=?",
                     (pnl, now.isoformat(), pos["id"]),
@@ -1294,7 +1299,11 @@ class LiveExecution(ExecutionAdapter):
                             symbol=symbol, side=close_side, position_side=side,
                             order_type="MARKET", quantity=exch_qty,
                         )
+                        mark = await self.market.fetch_mark_price(symbol)
                         pnl = (mark - entry) * exch_qty if side == "LONG" else (entry - mark) * exch_qty
+                        entry_fee = entry * exch_qty * (self.cfg.fee_rate_bps / 10_000)
+                        exit_fee = mark * exch_qty * (self.cfg.fee_rate_bps / 10_000)
+                        pnl -= entry_fee + exit_fee
                         self.db.execute(
                             "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=? WHERE id=?",
                             (pnl, now.isoformat(), pos["id"]),
@@ -1425,6 +1434,9 @@ class LiveExecution(ExecutionAdapter):
                     )
                     mark = await self.market.fetch_mark_price(symbol)
                     pnl = (mark - entry) * exch_qty if side == "LONG" else (entry - mark) * exch_qty
+                    entry_fee = entry * exch_qty * (self.cfg.fee_rate_bps / 10_000)
+                    exit_fee = mark * exch_qty * (self.cfg.fee_rate_bps / 10_000)
+                    pnl -= entry_fee + exit_fee
                     self.db.execute(
                         "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=? WHERE id=?",
                         (pnl, now.isoformat(), pos["id"]),
@@ -1450,6 +1462,9 @@ class LiveExecution(ExecutionAdapter):
                     )
                     mark = await self.market.fetch_mark_price(symbol)
                     pnl = (mark - entry) * exch_qty if side == "LONG" else (entry - mark) * exch_qty
+                    entry_fee = entry * exch_qty * (self.cfg.fee_rate_bps / 10_000)
+                    exit_fee = mark * exch_qty * (self.cfg.fee_rate_bps / 10_000)
+                    pnl -= entry_fee + exit_fee
                     self.db.execute(
                         "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=? "
                         "WHERE id=?",
