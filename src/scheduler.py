@@ -578,6 +578,10 @@ class Scheduler:
                 if mark <= 0:
                     mark = entry
                 pnl = (mark - entry) * qty if side == "LONG" else (entry - mark) * qty
+                # Deduct fees for consistency with execution layer
+                entry_fee = entry * qty * (self.cfg.fee_rate_bps / 10_000)
+                exit_fee = mark * qty * (self.cfg.fee_rate_bps / 10_000)
+                pnl -= entry_fee + exit_fee
                 self.db.execute(
                     "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=? WHERE id=?",
                     (pnl, datetime.now(timezone.utc).isoformat(), pos["id"]),

@@ -63,14 +63,15 @@ class Portfolio:
     def record_daily_pnl(self) -> None:
         """Snapshot daily PnL to pnl_daily table."""
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        positions = self.get_open_positions()
+        is_paper = self.cfg.paper_mode
+        positions = self.get_open_positions(is_paper)
         unrealised = sum(p.get("unrealised_pnl", 0) for p in positions)
 
-        # Count today's trades
+        # Count today's trades (same mode as current run: paper or live)
         today_start = f"{today}T00:00:00"
         today_trades = self.db.fetch_all(
-            "SELECT * FROM positions WHERE closed_at >= ? AND is_paper=1",
-            (today_start,),
+            "SELECT * FROM positions WHERE closed_at >= ? AND is_paper=?",
+            (today_start, 1 if is_paper else 0),
         )
         total_trades = len(today_trades)
         winning = sum(1 for t in today_trades if t.get("realised_pnl", 0) > 0)
