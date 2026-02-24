@@ -176,6 +176,14 @@ class Settings(BaseSettings):
     weight_liq_cascade: float = 15.0
     liq_cascade_min_intensity: float = 0.3  # minimum intensity to trigger vote
 
+    # Volume Profile
+    weight_volume_profile: float = 10.0
+
+    # Sentiment Analysis
+    use_sentiment: bool = True
+    weight_sentiment: float = 10.0
+    sentiment_threshold: float = 20.0  # min absolute composite score to trigger vote
+
     # ── Momentum Quality Filter ──────────────────────────────
     require_momentum_confirmation: bool = True
     momentum_bonus_weight: float = 10.0

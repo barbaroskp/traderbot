@@ -100,6 +100,15 @@ class Indicators:
     # ── Liquidation Cascade Detection ──
     liq_cascade_signal: str = "NONE"  # LONG_LIQ, SHORT_SQUEEZE, NONE
     liq_cascade_intensity: float = 0.0  # 0-1, strength of cascade signal
+    # ── Volume Profile ──
+    volume_profile_poc: float = 0.0      # Point of Control price (highest volume level)
+    volume_profile_vah: float = 0.0      # Value Area High
+    volume_profile_val: float = 0.0      # Value Area Low
+    price_vs_poc_bps: float = 0.0        # price distance from POC in bps
+    price_in_value_area: bool = False     # True if price is between VAL and VAH
+    # ── Composite Sentiment ──
+    composite_sentiment: float = 0.0     # -100 to +100 (bearish to bullish)
+    fear_greed_index: float = 50.0       # 0-100, from alternative.me API
 
 
 @dataclass
@@ -153,6 +162,48 @@ def _detect_liquidation_cascade(ind: "Indicators") -> None:
             ind.liq_cascade_intensity = intensity
 
 
+def _compute_composite_sentiment(
+    funding_rate: float,
+    oi_change_pct: float,
+    taker_buy_ratio: float,
+    fear_greed: float,
+    volume_ratio: float,
+) -> float:
+    """Compute composite sentiment score from -100 to +100.
+
+    Components (weighted):
+    - Funding rate: negative = bearish crowding, positive = bullish crowding (inverted as contrarian)
+    - OI change: rising = more engagement (bullish if price rising)
+    - Taker buy ratio: >0.5 = aggressive buying (bullish)
+    - Fear & Greed: >50 = greed (cautious), <30 = fear (opportunity)
+    - Volume ratio: >1.5 = high activity
+    """
+    score = 0.0
+
+    # Funding rate (contrarian): very high funding → bearish, very negative → bullish
+    # Scale: funding ±0.001 maps to ∓30 points
+    funding_signal = -funding_rate * 30_000  # e.g. 0.001 → -30
+    score += max(-30, min(30, funding_signal)) * 0.25
+
+    # OI momentum: rising OI = engagement (directional)
+    oi_signal = max(-20, min(20, oi_change_pct * 4))
+    score += oi_signal * 0.20
+
+    # Taker buy ratio: >0.5 = bullish, <0.5 = bearish
+    taker_signal = (taker_buy_ratio - 0.5) * 200  # 0.6 → +20, 0.4 → -20
+    score += max(-25, min(25, taker_signal)) * 0.25
+
+    # Fear & Greed (contrarian): extreme fear = buy opportunity, extreme greed = caution
+    fg_signal = (fear_greed - 50) * -0.6  # 20 (fear) → +18, 80 (greed) → -18
+    score += max(-20, min(20, fg_signal)) * 0.15
+
+    # Volume spike: high volume confirms direction
+    vol_signal = (volume_ratio - 1.0) * 15  # 2.0 → +15
+    score += max(-15, min(15, vol_signal)) * 0.15
+
+    return max(-100, min(100, score))
+
+
 class MarketData:
     """Fetches and processes market data for symbol lists."""
 
@@ -162,6 +213,7 @@ class MarketData:
         self.db = db
         self._ema_states: dict[str, EMAState] = {}
         self._prev_oi: dict[str, float] = {}  # previous open interest per symbol
+        self._fear_greed_cache: tuple[float, float] = (50.0, 0.0)  # (value, timestamp)
 
     def get_ema_state(self, symbol: str) -> EMAState:
         if symbol not in self._ema_states:
@@ -280,6 +332,31 @@ class MarketData:
         except (BingXClientError, ValueError, TypeError) as exc:
             log.debug("open interest fetch failed", extra={"symbol": symbol, "error": str(exc)})
             return 0.0, 0.0
+
+    # ── Fear & Greed Index ──────────────────────────────────────
+
+    async def fetch_fear_greed(self) -> float:
+        """Fetch Crypto Fear & Greed Index from alternative.me API.
+
+        Cached for 10 minutes to avoid unnecessary requests.
+        Returns 0-100 (0=Extreme Fear, 100=Extreme Greed), default 50.
+        """
+        import time
+        cached_val, cached_ts = self._fear_greed_cache
+        if time.time() - cached_ts < 600:  # 10 min cache
+            return cached_val
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10) as http:
+                resp = await http.get("https://api.alternative.me/fng/?limit=1")
+                resp.raise_for_status()
+                data = resp.json()
+                value = float(data["data"][0]["value"])
+                self._fear_greed_cache = (value, time.time())
+                return value
+        except Exception as exc:
+            log.debug("fear & greed fetch failed: %s", exc)
+            return cached_val  # return last cached or default 50
 
     # ── Kline + Indicators ─────────────────────────────────────
 
@@ -489,6 +566,17 @@ class MarketData:
             ind.price_velocity_bps, ind.price_acceleration = self._compute_velocity(
                 closes, self.cfg.velocity_lookback,
             )
+
+        # ── Volume Profile (POC, VAH, VAL) ──
+        if len(closes) >= 20 and len(highs) == len(closes):
+            poc, vah, val = self._compute_volume_profile(highs, lows, closes, volumes)
+            ind.volume_profile_poc = poc
+            ind.volume_profile_vah = vah
+            ind.volume_profile_val = val
+            cur_price = closes[-1]
+            if poc > 0:
+                ind.price_vs_poc_bps = ((cur_price - poc) / poc) * 10_000
+            ind.price_in_value_area = val <= cur_price <= vah
 
         ind.valid = True
         return ind
@@ -939,6 +1027,70 @@ class MarketData:
             acceleration = velocity - prev_velocity
         return velocity, acceleration
 
+    @staticmethod
+    def _compute_volume_profile(
+        highs: list[float],
+        lows: list[float],
+        closes: list[float],
+        volumes: list[float],
+        num_bins: int = 24,
+        value_area_pct: float = 0.70,
+    ) -> tuple[float, float, float]:
+        """Compute Volume Profile: POC, VAH, VAL.
+
+        Distributes each candle's volume across price bins proportionally.
+        POC = bin with highest volume.
+        Value Area = smallest range of bins containing value_area_pct of total volume.
+        """
+        if not highs or not lows:
+            return 0.0, 0.0, 0.0
+
+        price_low = min(lows)
+        price_high = max(highs)
+        if price_high <= price_low or price_high == 0:
+            return closes[-1] if closes else 0.0, price_high, price_low
+
+        bin_size = (price_high - price_low) / num_bins
+        bin_volumes = [0.0] * num_bins
+        bin_prices = [price_low + (i + 0.5) * bin_size for i in range(num_bins)]
+
+        for h, l, v in zip(highs, lows, volumes):
+            if v <= 0 or h <= l:
+                continue
+            lo_bin = max(0, int((l - price_low) / bin_size))
+            hi_bin = min(num_bins - 1, int((h - price_low) / bin_size))
+            span = hi_bin - lo_bin + 1
+            vol_per_bin = v / span
+            for b in range(lo_bin, hi_bin + 1):
+                bin_volumes[b] += vol_per_bin
+
+        # POC = bin with max volume
+        poc_idx = max(range(num_bins), key=lambda i: bin_volumes[i])
+        poc = bin_prices[poc_idx]
+
+        # Value Area: expand from POC until value_area_pct of total volume
+        total_vol = sum(bin_volumes)
+        if total_vol <= 0:
+            return poc, price_high, price_low
+
+        va_vol = bin_volumes[poc_idx]
+        lo_idx, hi_idx = poc_idx, poc_idx
+        while va_vol / total_vol < value_area_pct:
+            expand_lo = bin_volumes[lo_idx - 1] if lo_idx > 0 else -1
+            expand_hi = bin_volumes[hi_idx + 1] if hi_idx < num_bins - 1 else -1
+            if expand_lo < 0 and expand_hi < 0:
+                break
+            if expand_lo >= expand_hi:
+                lo_idx -= 1
+                va_vol += bin_volumes[lo_idx]
+            else:
+                hi_idx += 1
+                va_vol += bin_volumes[hi_idx]
+
+        val = bin_prices[lo_idx] - bin_size / 2  # lower edge of low bin
+        vah = bin_prices[hi_idx] + bin_size / 2  # upper edge of high bin
+        return poc, vah, val
+
     # ── Running EMA (per-tick, for z-score) ────────────────────
 
     def update_ema(self, symbol: str, price: float) -> tuple[float, float, float]:
@@ -978,6 +1130,9 @@ class MarketData:
             tasks.append(self.fetch_klines_higher_tf(symbol))
         if need_oi:
             tasks.append(self.fetch_open_interest(symbol))
+        need_sentiment = self.cfg.use_sentiment
+        if need_sentiment:
+            tasks.append(self.fetch_fear_greed())
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -1032,6 +1187,20 @@ class MarketData:
                 snap.indicators.oi_change_pct = oi_result[1]
                 # Liquidation cascade detection
                 _detect_liquidation_cascade(snap.indicators)
+            idx += 1
+
+        # Fear & Greed Index → composite sentiment
+        if need_sentiment:
+            fg_result = results[idx]
+            fg_val = fg_result if isinstance(fg_result, float) else 50.0
+            snap.indicators.fear_greed_index = fg_val
+            snap.indicators.composite_sentiment = _compute_composite_sentiment(
+                funding_rate=snap.funding_rate,
+                oi_change_pct=snap.indicators.oi_change_pct,
+                taker_buy_ratio=snap.indicators.taker_buy_ratio,
+                fear_greed=fg_val,
+                volume_ratio=snap.indicators.volume_ratio,
+            )
             idx += 1
 
         # Use kline-based EMA as primary (reliable, no warmup bug)
@@ -1092,6 +1261,8 @@ class MarketData:
         ]
         if self.cfg.use_open_interest:
             tasks.append(self.fetch_open_interest(symbol))
+        if self.cfg.use_sentiment:
+            tasks.append(self.fetch_fear_greed())
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Depth
@@ -1138,6 +1309,20 @@ class MarketData:
                 snap.indicators.open_interest = oi_result[0]
                 snap.indicators.oi_change_pct = oi_result[1]
                 _detect_liquidation_cascade(snap.indicators)
+
+        # Fear & Greed → composite sentiment (swing)
+        if self.cfg.use_sentiment:
+            fg_idx = 5 if self.cfg.use_open_interest else 4
+            fg_result = results[fg_idx] if fg_idx < len(results) else 50.0
+            fg_val = fg_result if isinstance(fg_result, float) else 50.0
+            snap.indicators.fear_greed_index = fg_val
+            snap.indicators.composite_sentiment = _compute_composite_sentiment(
+                funding_rate=snap.funding_rate,
+                oi_change_pct=snap.indicators.oi_change_pct,
+                taker_buy_ratio=snap.indicators.taker_buy_ratio,
+                fear_greed=fg_val,
+                volume_ratio=snap.indicators.volume_ratio,
+            )
 
         # EMA from swing klines
         if snap.indicators.valid and snap.indicators.kline_fast_ema > 0:

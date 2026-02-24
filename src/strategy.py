@@ -1,6 +1,6 @@
 """Multi-indicator confluence strategy – optimized for maximum profitability.
 
-Signal generation uses 20 independent indicators that each "vote" for LONG, SHORT, or NEUTRAL.
+Signal generation uses 22 independent indicators that each "vote" for LONG, SHORT, or NEUTRAL.
 A trade is only taken when enough indicators agree (confluence).
 
 Indicators:
@@ -24,6 +24,8 @@ Indicators:
   18. Price Velocity: Rate of price change confirms momentum or warns of reversal
   19. Whale Detection: Large orders in orderbook (bid/ask walls) indicate support/resistance
   20. Liquidation Cascade: OI drop + price movement = forced liquidations or squeezes
+  21. Volume Profile: POC/VAH/VAL as support/resistance, breakout detection
+  22. Composite Sentiment: Funding rate + OI + taker ratio + Fear & Greed Index
 
 Additional filters & bonuses:
   - Funding time avoidance (±30 min around 00/08/16 UTC)
@@ -990,6 +992,59 @@ class Strategy:
                     value=indicators.oi_change_pct,
                     reason=f"short squeeze (OI {indicators.oi_change_pct:.1f}%, intensity={intensity:.2f})",
                 ))
+
+        # 21. Volume Profile vote (POC as support/resistance)
+        poc = indicators.volume_profile_poc
+        if poc > 0 and indicators.price_vs_poc_bps != 0:
+            dist = abs(indicators.price_vs_poc_bps)
+            if dist < 50:  # price near POC (within 50 bps = ~0.5%)
+                if indicators.price_in_value_area:
+                    # Inside value area near POC → mean reversion toward POC
+                    if indicators.price_vs_poc_bps > 0:
+                        votes.append(IndicatorVote(
+                            name="volume_profile", side="SHORT",
+                            weight=cfg.weight_volume_profile * 0.7,
+                            value=indicators.price_vs_poc_bps,
+                            reason=f"price above POC by {indicators.price_vs_poc_bps:.0f}bps (revert to POC)",
+                        ))
+                    else:
+                        votes.append(IndicatorVote(
+                            name="volume_profile", side="LONG",
+                            weight=cfg.weight_volume_profile * 0.7,
+                            value=indicators.price_vs_poc_bps,
+                            reason=f"price below POC by {indicators.price_vs_poc_bps:.0f}bps (revert to POC)",
+                        ))
+            elif not indicators.price_in_value_area:
+                # Outside value area → breakout or rejection
+                if indicators.price_vs_poc_bps > 100:
+                    # Well above VA → strong breakout bullish
+                    votes.append(IndicatorVote(
+                        name="volume_profile", side="LONG",
+                        weight=cfg.weight_volume_profile,
+                        value=indicators.price_vs_poc_bps,
+                        reason=f"price broke above value area (+{indicators.price_vs_poc_bps:.0f}bps)",
+                    ))
+                elif indicators.price_vs_poc_bps < -100:
+                    # Well below VA → strong breakout bearish
+                    votes.append(IndicatorVote(
+                        name="volume_profile", side="SHORT",
+                        weight=cfg.weight_volume_profile,
+                        value=indicators.price_vs_poc_bps,
+                        reason=f"price broke below value area ({indicators.price_vs_poc_bps:.0f}bps)",
+                    ))
+
+        # 22. Composite Sentiment vote
+        sentiment = indicators.composite_sentiment
+        if abs(sentiment) >= cfg.sentiment_threshold:
+            side = "LONG" if sentiment > 0 else "SHORT"
+            # Scale weight by how extreme the sentiment is (20→100 maps to 0.5→1.0)
+            intensity = min(1.0, abs(sentiment) / 80.0 + 0.25)
+            votes.append(IndicatorVote(
+                name="sentiment", side=side,
+                weight=cfg.weight_sentiment * intensity,
+                value=sentiment,
+                reason=f"composite sentiment {sentiment:+.1f} (F&G={indicators.fear_greed_index:.0f})",
+            ))
 
         return votes
 
