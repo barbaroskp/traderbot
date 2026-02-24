@@ -42,6 +42,16 @@ class Portfolio:
         positions = self.get_open_positions(is_paper)
         return sum(p.get("notional", 0) for p in positions)
 
+    def get_total_margin(self, is_paper: bool = True) -> float:
+        """Total margin used across all open positions (notional / leverage)."""
+        positions = self.get_open_positions(is_paper)
+        total = 0.0
+        for p in positions:
+            notional = p.get("notional", 0)
+            lev = p.get("leverage", self.cfg.leverage) or self.cfg.leverage
+            total += notional / max(1, lev)
+        return total
+
     def get_total_unrealised_pnl(self, is_paper: bool = True) -> float:
         positions = self.get_open_positions(is_paper)
         return sum(p.get("unrealised_pnl", 0) for p in positions)

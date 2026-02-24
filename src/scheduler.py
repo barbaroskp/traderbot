@@ -236,7 +236,7 @@ class Scheduler:
         # ── 6. Execute signals (best first by weighted score) ─────
         all_signals = signals + swing_signals
         signals_sorted = sorted(all_signals, key=lambda s: (s.confluence_score, s.weighted_score), reverse=True)
-        current_notional = self.portfolio.get_total_notional(is_paper)
+        current_margin = self.portfolio.get_total_margin(is_paper)
         executed = 0
 
         if soft_kill_active:
@@ -261,53 +261,65 @@ class Scheduler:
                     log.info("llm rejected signal", extra={"symbol": sig.symbol, "reason": advice.reason})
                     continue
 
+                # ── 1. Determine leverage FIRST (needed for margin-based sizing) ──
+                if getattr(sig, "trade_type", "scalp") == "swing":
+                    effective_leverage: int | None = self.cfg.swing_leverage
+                else:
+                    effective_leverage: int | None = self._dynamic_leverage(sig)
+
+                # High-conviction check (affects both leverage and margin)
+                is_high_conviction = (
+                    sig.confluence_score >= self.cfg.high_conviction_min_confluence
+                    and sig.weighted_score >= self.cfg.high_conviction_min_weighted_score
+                )
+                if is_high_conviction:
+                    effective_leverage = max(
+                        effective_leverage or 0,
+                        self.cfg.leverage_high_conviction,
+                    ) or None
+
+                if effective_leverage is not None:
+                    effective_leverage = min(effective_leverage, self.cfg.max_leverage_allowed)
+
+                final_leverage = effective_leverage or self.cfg.leverage
+
+                # ── 2. Compute position size (margin-based: margin × leverage = notional) ──
                 qty = self.risk.compute_position_size(
                     price=snap.mid_price,
-                    current_total_notional=current_notional,
+                    leverage=final_leverage,
+                    current_total_margin=current_margin,
                     atr=snap.indicators.atr if snap.indicators.valid else 0.0,
                 )
                 if qty <= 0:
                     log.warning("qty is zero after sizing", extra={"symbol": sig.symbol})
                     continue
 
-                # Dynamic leverage by confluence/score (optional)
-                # Swing trades use fixed lower leverage
-                if getattr(sig, "trade_type", "scalp") == "swing":
-                    effective_leverage: int | None = self.cfg.swing_leverage
-                else:
-                    effective_leverage: int | None = self._dynamic_leverage(sig)
-
-                # High-conviction: 5/5 confluence + high weighted score -> larger position + higher leverage
-                is_high_conviction = (
-                    sig.confluence_score >= self.cfg.high_conviction_min_confluence
-                    and sig.weighted_score >= self.cfg.high_conviction_min_weighted_score
-                )
+                # High-conviction: increase margin allocation (multiplier on margin)
                 if is_high_conviction:
-                    qty = qty * self.cfg.high_conviction_size_multiplier
-                    max_qty_high = self.cfg.max_trade_notional_high_conviction_usdt / snap.mid_price
+                    qty = qty * self.cfg.high_conviction_margin_multiplier
+                    # Cap by max margin for high conviction (margin cap, not notional)
+                    max_notional_high = self.cfg.max_margin_high_conviction_usdt * final_leverage
+                    max_qty_high = max_notional_high / snap.mid_price
                     qty = min(qty, max_qty_high)
-                    effective_leverage = max(
-                        effective_leverage or 0,
-                        self.cfg.leverage_high_conviction,
-                    ) or None
                     log.info(
-                        "high conviction signal: larger size + higher leverage",
+                        "high conviction signal: larger margin + higher leverage",
                         extra={
                             "symbol": sig.symbol,
                             "confluence": sig.confluence_score,
                             "weighted_score": round(sig.weighted_score, 1),
-                            "leverage": effective_leverage or self.cfg.leverage,
-                            "size_multiplier": self.cfg.high_conviction_size_multiplier,
+                            "leverage": final_leverage,
+                            "margin_multiplier": self.cfg.high_conviction_margin_multiplier,
+                            "margin": round(qty * snap.mid_price / final_leverage, 2),
+                            "notional": round(qty * snap.mid_price, 2),
                         },
                     )
-
-                if effective_leverage is not None:
-                    effective_leverage = min(effective_leverage, self.cfg.max_leverage_allowed)
 
                 if advice.action == "reduce":
                     qty = qty * 0.5
                     log.info("llm reduced size", extra={"symbol": sig.symbol, "reason": advice.reason})
 
+                notional = qty * snap.mid_price
+                margin = notional / final_leverage
                 log.info(
                     "executing signal",
                     extra={
@@ -322,8 +334,9 @@ class Scheduler:
                         "trend": sig.trend_direction,
                         "price": snap.mid_price,
                         "qty": qty,
-                        "notional": round(qty * snap.mid_price, 2),
-                        "leverage": effective_leverage or self.cfg.leverage,
+                        "margin": round(margin, 2),
+                        "notional": round(notional, 2),
+                        "leverage": final_leverage,
                     },
                 )
 
@@ -331,7 +344,7 @@ class Scheduler:
                     signal=sig,
                     snap=snap,
                     qty=qty,
-                    current_total_notional=current_notional,
+                    current_total_notional=current_margin,
                     leverage_override=effective_leverage,
                 )
                 if result:
@@ -346,7 +359,9 @@ class Scheduler:
                     )
                 if result and result.status == "FILLED":
                     executed += 1
-                    current_notional += result.avg_fill_price * result.filled_qty
+                    # Track margin usage: margin = notional / leverage
+                    fill_notional = result.avg_fill_price * result.filled_qty
+                    current_margin += fill_notional / final_leverage
                     if getattr(sig, "trade_type", "scalp") == "swing":
                         self.strategy.set_swing_cooldown(sig.symbol)
                     else:

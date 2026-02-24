@@ -58,9 +58,9 @@ class TestConfig:
     def test_aggressive_params(self) -> None:
         """Test aggressive profitability parameters."""
         cfg = Settings()
-        # Aggressive capital/risk
-        assert cfg.max_total_notional_usdt == 30.0
-        assert cfg.max_trade_notional_usdt == 8.0
+        # Aggressive capital/risk (margin-based)
+        assert cfg.max_total_margin_usdt == 15.0
+        assert cfg.max_trade_margin_usdt == 4.0
         assert cfg.per_trade_fraction == 0.08
         assert cfg.leverage == 5
         assert cfg.leverage_high_conviction == 10

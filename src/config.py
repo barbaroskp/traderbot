@@ -37,22 +37,23 @@ class Settings(BaseSettings):
     paper_mode: bool = True
     allow_live_trading: bool = False
 
-    # ── Capital ────────────────────────────────────────────────
+    # ── Capital (Margin-Based Futures Sizing) ─────────────────
+    # Position sizing: margin = balance × fraction, notional = margin × leverage
     initial_capital_usdt: float = 50.0
-    max_total_notional_usdt: float = 30.0   # aggressive: doubled (was 15)
-    max_trade_notional_usdt: float = 8.0    # aggressive: bigger trades (was 5)
-    per_trade_fraction: float = 0.08        # aggressive: 8% per trade (was 5%)
+    max_total_margin_usdt: float = 15.0    # max total MARGIN across all positions (was max_total_notional_usdt)
+    max_trade_margin_usdt: float = 4.0     # max MARGIN per single trade (was max_trade_notional_usdt)
+    per_trade_fraction: float = 0.08       # 8% of balance as MARGIN per trade
 
     # ── Risk ───────────────────────────────────────────────────
-    leverage: int = 5                       # aggressive: 5x base (was 2)
-    leverage_high_conviction: int = 10      # aggressive: 10x for best signals (was 5)
-    max_leverage_allowed: int = 15          # aggressive: allow up to 15x (was 5)
+    leverage: int = 5                       # base leverage: notional = margin × 5
+    leverage_high_conviction: int = 10      # high conviction: notional = margin × 10
+    max_leverage_allowed: int = 15          # hard cap: max 15x leverage
     margin_mode: MarginMode = MarginMode.ISOLATED
-    # High-conviction: all indicators agree → larger position + higher leverage
+    # High-conviction: all indicators agree → larger margin allocation + higher leverage
     high_conviction_min_confluence: int = 5
     high_conviction_min_weighted_score: float = 75.0   # 0-100 normalized: 75% of max indicator agreement
-    high_conviction_size_multiplier: float = 2.0       # aggressive: 2x size (was 1.5)
-    max_trade_notional_high_conviction_usdt: float = 15.0  # bigger cap (was 10)
+    high_conviction_margin_multiplier: float = 2.0     # 2x margin allocation for high conviction signals
+    max_margin_high_conviction_usdt: float = 6.0       # max MARGIN for high conviction trades
 
     # ── Strategy (EMA baseline) ──────────────────────────────
     fast_ema: int = 9
@@ -203,17 +204,17 @@ class Settings(BaseSettings):
     time_decay_start_pct: float = 0.4       # aggressive: start tightening earlier (was 0.5)
     time_decay_sl_reduction_pct: float = 0.5
 
-    # ── Kelly Criterion Sizing ──────────────────────────────────
+    # ── Kelly Criterion Sizing (outputs MARGIN fraction) ──────
     use_kelly_sizing: bool = True
     kelly_fraction: float = 0.5  # half-Kelly (safer than full Kelly)
     kelly_min_trades: int = 20   # need at least this many closed trades for reliable stats
-    kelly_min_fraction: float = 0.02  # minimum 2% even if Kelly says less
-    kelly_max_fraction: float = 0.12  # cap at 12% even if Kelly says more
+    kelly_min_fraction: float = 0.02  # minimum 2% of balance as margin
+    kelly_max_fraction: float = 0.12  # cap at 12% of balance as margin
 
-    # ── Volatility-Adjusted Sizing ────────────────────────────
+    # ── Volatility-Adjusted Sizing (outputs MARGIN amount) ───
     use_volatility_sizing: bool = True
-    target_risk_pct: float = 0.02           # aggressive: 2% risk per trade (was 1%)
-    volatility_sizing_atr_mult: float = 1.2 # aggressive: less conservative sizing (was 1.5)
+    target_risk_pct: float = 0.02           # 2% of balance risked as margin per trade
+    volatility_sizing_atr_mult: float = 1.2 # ATR multiplier for risk calculation
 
     # ── Selector ───────────────────────────────────────────────
     max_spread_bps: float = 45.0   # 25 cok sikti (425 sembol eleniyordu), 45 = daha fazla tradeable

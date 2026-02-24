@@ -237,21 +237,21 @@ class RiskManager:
 
         return self._state
 
-    def get_max_trade_notional(self) -> float:
-        """Max notional per trade, adjusted by risk state.
+    def get_max_trade_margin(self) -> float:
+        """Max MARGIN per trade, adjusted by risk state.
 
         Even in ULTRA_TIGHT, allows reasonable trade sizes.
         """
-        base = self.cfg.max_trade_notional_usdt
+        base = self.cfg.max_trade_margin_usdt
         if self._state == RiskState.TIGHT:
-            return base * 0.7   # was 0.5, now 70%
+            return base * 0.7   # 70% of max margin
         elif self._state == RiskState.ULTRA_TIGHT:
-            return base * 0.4   # was 0.2, now 40% — still tradeable
+            return base * 0.4   # 40% of max margin — still tradeable
         return base
 
-    def get_max_total_notional(self) -> float:
-        """Max total notional across all positions."""
-        base = self.cfg.max_total_notional_usdt
+    def get_max_total_margin(self) -> float:
+        """Max total MARGIN across all positions."""
+        base = self.cfg.max_total_margin_usdt
         if self._state == RiskState.TIGHT:
             return base * 0.7
         elif self._state == RiskState.ULTRA_TIGHT:
@@ -329,60 +329,74 @@ class RiskManager:
     def compute_position_size(
         self,
         price: float,
-        current_total_notional: float,
+        leverage: int,
+        current_total_margin: float,
         atr: float = 0.0,
     ) -> float:
-        """Compute order quantity in base asset.
+        """Compute order quantity in base asset using margin-based futures sizing.
+
+        Sizing model:
+            margin  = balance × fraction  (Kelly / Volatility / Fraction)
+            notional = margin × leverage
+            qty      = notional / price
 
         Priority: Kelly → Volatility → Fraction-based sizing.
+        All three methods compute MARGIN first, then leverage amplifies it.
         """
-        max_trade = self.get_max_trade_notional()
-        max_total = self.get_max_total_notional()
-        remaining = max(0, max_total - current_total_notional)
-        min_notional = 2.0
+        max_trade_margin = self.get_max_trade_margin()
+        max_total_margin = self.get_max_total_margin()
+        remaining_margin = max(0, max_total_margin - current_total_margin)
+        min_margin = 2.0  # minimum viable margin in USDT
 
-        # Hard stop: never open new position if exposure budget is exhausted
-        # or below exchange minimum viable notional.
-        if price <= 0 or remaining < min_notional:
+        # Hard stop: never open new position if margin budget is exhausted
+        if price <= 0 or remaining_margin < min_margin:
             return 0.0
+
+        leverage = max(1, leverage)  # safety: never zero/negative leverage
 
         # ── Kelly Criterion sizing (highest priority when available) ──
         kelly_f = self._compute_kelly_fraction()
         if kelly_f is not None:
-            kelly_notional = max(min_notional, self._current_balance * kelly_f)
-            kelly_notional = min(kelly_notional, max_trade, remaining)
-            qty = kelly_notional / price
+            kelly_margin = max(min_margin, self._current_balance * kelly_f)
+            kelly_margin = min(kelly_margin, max_trade_margin, remaining_margin)
+            notional = kelly_margin * leverage
+            qty = notional / price
             log.debug(
-                "kelly position size",
+                "kelly position size (margin-based)",
                 extra={
                     "kelly_fraction": round(kelly_f, 4),
-                    "notional": round(kelly_notional, 4),
+                    "margin": round(kelly_margin, 4),
+                    "leverage": leverage,
+                    "notional": round(notional, 4),
                     "qty": qty,
                     "balance": self._current_balance,
                 },
             )
             return qty
 
-        # Volatility-adjusted sizing: target a fixed dollar risk per trade
+        # ── Volatility-adjusted sizing: target a fixed dollar risk as margin ──
         if self.cfg.use_volatility_sizing and atr > 0:
-            # risk_amount = balance * target_risk_pct (e.g., 1% of 50 USDT = 0.5 USDT)
+            # risk_amount = balance * target_risk_pct → margin allocation
             risk_amount = self._current_balance * self.cfg.target_risk_pct
-            # qty = risk_amount / (ATR * multiplier) → fewer contracts when ATR is high
             atr_risk = atr * self.cfg.volatility_sizing_atr_mult
             if atr_risk > 0:
+                # vol_qty is based on ATR risk, convert to margin equivalent
                 vol_qty = risk_amount / atr_risk
-                vol_notional = vol_qty * price
-                # Cap by regular limits
-                vol_notional = max(min_notional, vol_notional)
-                vol_notional = min(vol_notional, max_trade, remaining)
-                qty = vol_notional / price
+                vol_margin = vol_qty * price  # margin needed for this qty (before leverage)
+                # Cap by margin limits
+                vol_margin = max(min_margin, vol_margin)
+                vol_margin = min(vol_margin, max_trade_margin, remaining_margin)
+                notional = vol_margin * leverage
+                qty = notional / price
                 log.debug(
-                    "volatility-adjusted sizing",
+                    "volatility-adjusted sizing (margin-based)",
                     extra={
                         "price": price,
                         "atr": round(atr, 6),
                         "risk_amount": round(risk_amount, 4),
-                        "vol_notional": round(vol_notional, 4),
+                        "margin": round(vol_margin, 4),
+                        "leverage": leverage,
+                        "notional": round(notional, 4),
                         "qty": qty,
                         "balance": self._current_balance,
                         "risk_state": self._state.value,
@@ -390,23 +404,26 @@ class RiskManager:
                 )
                 return qty
 
-        # Fallback: fraction-based sizing
-        fraction_notional = self._current_balance * self.cfg.per_trade_fraction
-        notional = max(min_notional, fraction_notional)
-        notional = min(notional, max_trade, remaining)
+        # ── Fallback: fraction-based sizing ──
+        fraction_margin = self._current_balance * self.cfg.per_trade_fraction
+        margin = max(min_margin, fraction_margin)
+        margin = min(margin, max_trade_margin, remaining_margin)
 
-        if notional < min_notional:
+        if margin < min_margin:
             return 0.0
 
+        notional = margin * leverage
         qty = notional / price
         log.debug(
-            "position size computed",
+            "position size computed (margin-based)",
             extra={
                 "price": price,
+                "margin": round(margin, 4),
+                "leverage": leverage,
                 "notional": round(notional, 4),
                 "qty": qty,
                 "balance": self._current_balance,
-                "remaining_capacity": round(remaining, 2),
+                "remaining_margin": round(remaining_margin, 2),
                 "risk_state": self._state.value,
             },
         )
@@ -422,8 +439,8 @@ class RiskManager:
             "drawdown_pct": round(self.drawdown_pct, 2),
             "balance": round(self._current_balance, 2),
             "peak_balance": round(self._peak_balance, 2),
-            "max_trade_notional": self.get_max_trade_notional(),
-            "max_total_notional": self.get_max_total_notional(),
+            "max_trade_margin": self.get_max_trade_margin(),
+            "max_total_margin": self.get_max_total_margin(),
             "minutes_in_current_state": round(minutes_in_state, 1),
             "auto_recovery_in_minutes": self._time_to_recovery(),
         }
