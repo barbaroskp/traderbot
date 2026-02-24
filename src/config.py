@@ -228,6 +228,8 @@ class Settings(BaseSettings):
     atr_tp_multiplier: float = 2.0
     min_sl_bps: float = 30.0
     min_tp_bps: float = 60.0
+    # TP must be at least this many bps above round-trip fees so that at TP we have net profit
+    min_tp_net_bps: float = 10.0
     use_trailing_stop: bool = True
     trailing_activation_pct: float = 0.4   # fraction of TP to activate trailing
     trailing_distance_pct: float = 0.6     # fraction of SL distance for trail
