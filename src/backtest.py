@@ -337,11 +337,15 @@ class BacktestEngine:
         ts: datetime,
     ) -> None:
         """Open a virtual position."""
-        # Size the position
-        current_notional = sum(p.notional for p in self._positions)
+        # Determine leverage for backtest (use base leverage)
+        leverage = self.cfg.leverage
+
+        # Size the position (margin-based: margin × leverage = notional)
+        current_margin = sum(p.notional / max(1, self.cfg.leverage) for p in self._positions)
         qty = self._risk.compute_position_size(
             price=snap.mid_price,
-            current_total_notional=current_notional,
+            leverage=leverage,
+            current_total_margin=current_margin,
             atr=snap.indicators.atr if snap.indicators.valid else 0.0,
         )
         if qty <= 0:

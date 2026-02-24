@@ -140,40 +140,52 @@ class TestRiskStateTransitions:
         assert "auto_recovery_in_minutes" in diag
 
 
-class TestRiskNotionalScaling:
-    def test_normal_notional(self, cfg, db) -> None:
+class TestRiskMarginScaling:
+    def test_normal_margin(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
-        assert rm.get_max_trade_notional() == cfg.max_trade_notional_usdt
+        assert rm.get_max_trade_margin() == cfg.max_trade_margin_usdt
 
-    def test_tight_70pct_notional(self, cfg, db) -> None:
+    def test_tight_70pct_margin(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
         rm._state = RiskState.TIGHT
-        assert rm.get_max_trade_notional() == cfg.max_trade_notional_usdt * 0.7
+        assert rm.get_max_trade_margin() == cfg.max_trade_margin_usdt * 0.7
 
-    def test_ultra_tight_40pct_notional(self, cfg, db) -> None:
+    def test_ultra_tight_40pct_margin(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
         rm._state = RiskState.ULTRA_TIGHT
-        expected = cfg.max_trade_notional_usdt * 0.4
-        assert rm.get_max_trade_notional() == expected
+        expected = cfg.max_trade_margin_usdt * 0.4
+        assert rm.get_max_trade_margin() == expected
 
 
 class TestPositionSizing:
-    def test_basic_sizing(self, cfg, db) -> None:
+    def test_basic_sizing_margin_based(self, cfg, db) -> None:
+        """Margin-based sizing: margin = balance * fraction, notional = margin * leverage."""
         rm = RiskManager(cfg, db)
-        qty = rm.compute_position_size(price=50000, current_total_notional=0)
-        notional = qty * 50000
-        assert 1.0 <= notional <= cfg.max_trade_notional_usdt
+        leverage = cfg.leverage  # 5x
+        qty = rm.compute_position_size(price=50000, leverage=leverage, current_total_margin=0)
+        margin = (qty * 50000) / leverage
+        # Margin should be between min_margin (2.0) and max_trade_margin
+        assert 1.0 <= margin <= cfg.max_trade_margin_usdt
 
-    def test_respects_remaining_capacity(self, cfg, db) -> None:
+    def test_leverage_amplifies_notional(self, cfg, db) -> None:
+        """Higher leverage = larger notional for same margin."""
         rm = RiskManager(cfg, db)
-        # max_total_notional_usdt is 30 in aggressive mode, fill up most of it
-        qty = rm.compute_position_size(price=50000, current_total_notional=29.5)
-        notional = qty * 50000
-        assert notional <= 2.1  # min 2 USDT floor, remaining ~0.5
+        qty_5x = rm.compute_position_size(price=50000, leverage=5, current_total_margin=0)
+        qty_10x = rm.compute_position_size(price=50000, leverage=10, current_total_margin=0)
+        # 10x leverage should give roughly 2x the qty of 5x
+        assert qty_10x > qty_5x
+        assert qty_10x == pytest.approx(qty_5x * 2, rel=0.01)
+
+    def test_respects_remaining_margin_capacity(self, cfg, db) -> None:
+        rm = RiskManager(cfg, db)
+        # max_total_margin_usdt is 15.0, fill up most of it
+        qty = rm.compute_position_size(price=50000, leverage=5, current_total_margin=14.5)
+        margin = (qty * 50000) / 5
+        assert margin <= 2.1  # min 2 USDT floor, remaining ~0.5
 
     def test_zero_price_returns_zero(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
-        assert rm.compute_position_size(price=0, current_total_notional=0) == 0
+        assert rm.compute_position_size(price=0, leverage=5, current_total_margin=0) == 0
 
     def test_risk_state_logged(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
