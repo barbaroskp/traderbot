@@ -54,7 +54,7 @@ class TestPaperExecution:
             spread_bps=0.4, bid_depth_usdt=5000, ask_depth_usdt=5000,
         )
 
-        result = await paper_exec.execute_signal(signal, snap, qty=0.001, current_total_notional=0)
+        result = await paper_exec.execute_signal(signal, snap, qty=0.001, current_total_margin=0)
 
         assert result is not None
         assert result.status == "FILLED"
@@ -77,7 +77,7 @@ class TestPaperExecution:
             symbol="BTC-USDT", mid_price=50000, best_bid=49999, best_ask=50001,
         )
 
-        await paper_exec.execute_signal(signal, snap, qty=0.001, current_total_notional=0)
+        await paper_exec.execute_signal(signal, snap, qty=0.001, current_total_margin=0)
 
         # Should have 3-4 orders: entry + SL + TP (+ optional partial TP1)
         orders = db.fetch_all("SELECT * FROM orders")
@@ -98,7 +98,7 @@ class TestPaperExecution:
         snap = SymbolSnapshot(
             symbol="BTC-USDT", mid_price=50000, best_bid=49999, best_ask=50001,
         )
-        await paper_exec.execute_signal(signal, snap, qty=0.001, current_total_notional=0)
+        await paper_exec.execute_signal(signal, snap, qty=0.001, current_total_margin=0)
 
         # Set mark price below SL
         mock_market.fetch_mark_price.return_value = 49000.0
@@ -120,7 +120,7 @@ class TestPaperExecution:
         snap = SymbolSnapshot(
             symbol="BTC-USDT", mid_price=50000, best_bid=49999, best_ask=50001,
         )
-        await paper_exec.execute_signal(signal, snap, qty=0.001, current_total_notional=0)
+        await paper_exec.execute_signal(signal, snap, qty=0.001, current_total_margin=0)
 
         # Set mark price above TP
         mock_market.fetch_mark_price.return_value = 51000.0
@@ -142,7 +142,7 @@ class TestPaperExecution:
         snap = SymbolSnapshot(
             symbol="BTC-USDT", mid_price=50000, best_bid=49999, best_ask=50001,
         )
-        await paper_exec.execute_signal(signal, snap, qty=0.001, current_total_notional=0)
+        await paper_exec.execute_signal(signal, snap, qty=0.001, current_total_margin=0)
 
         # Backdate opened_at to exceed max_hold_minutes
         old_time = (datetime.now(timezone.utc) - timedelta(minutes=200)).isoformat()
@@ -163,7 +163,7 @@ class TestPaperExecution:
             spread_bps=2, depth_usdt=5000,
         )
         snap = SymbolSnapshot(symbol="BTC-USDT", mid_price=50000)
-        result = await paper_exec.execute_signal(signal, snap, qty=0, current_total_notional=0)
+        result = await paper_exec.execute_signal(signal, snap, qty=0, current_total_margin=0)
         assert result is None
 
     @pytest.mark.asyncio
@@ -176,7 +176,7 @@ class TestPaperExecution:
         snap = SymbolSnapshot(
             symbol="BTC-USDT", mid_price=50000, best_bid=49999, best_ask=50001,
         )
-        await paper_exec.execute_signal(signal, snap, qty=0.001, current_total_notional=0)
+        await paper_exec.execute_signal(signal, snap, qty=0.001, current_total_margin=0)
 
         # Price drops → short profits
         mock_market.fetch_mark_price.return_value = 48000.0
