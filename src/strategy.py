@@ -221,6 +221,16 @@ class Strategy:
         long_weighted = sum(v.weight for v in long_votes)
         short_weighted = sum(v.weight for v in short_votes)
 
+        # Pre-compute momentum for both sides so it influences confluence
+        long_momentum = self._check_momentum(indicators, "LONG")
+        short_momentum = self._check_momentum(indicators, "SHORT")
+        if self.cfg.require_momentum_confirmation and indicators.valid:
+            no_mom_discount = getattr(self.cfg, "no_momentum_discount", 0.7)
+            if not long_momentum:
+                long_weighted *= no_mom_discount
+            if not short_momentum:
+                short_weighted *= no_mom_discount
+
         # Confluence rule: mode-aware EMA anchor
         require_ema = self._require_ema_for_mode(mode)
         ema_vote = next((v for v in votes if v.name == "ema_zscore"), None)
@@ -229,11 +239,11 @@ class Strategy:
             if not ema_vote or ema_vote.side == "NEUTRAL":
                 return None
             # EMA voted LONG or SHORT; need at least one other indicator agreeing
-            if ema_vote.side == "LONG" and long_score >= 2 and long_score > short_score:
+            if ema_vote.side == "LONG" and long_score >= 2 and long_weighted > short_weighted:
                 side = "LONG"
                 confluence_score = long_score
                 weighted_score = long_weighted
-            elif ema_vote.side == "SHORT" and short_score >= 2 and short_score > long_score:
+            elif ema_vote.side == "SHORT" and short_score >= 2 and short_weighted > long_weighted:
                 side = "SHORT"
                 confluence_score = short_score
                 weighted_score = short_weighted
@@ -247,11 +257,11 @@ class Strategy:
         )
 
         if not require_ema:
-            if long_score >= effective_min_confluence and long_score > short_score:
+            if long_score >= effective_min_confluence and long_weighted > short_weighted:
                 side = "LONG"
                 confluence_score = long_score
                 weighted_score = long_weighted
-            elif short_score >= effective_min_confluence and short_score > long_score:
+            elif short_score >= effective_min_confluence and short_weighted > long_weighted:
                 side = "SHORT"
                 confluence_score = short_score
                 weighted_score = short_weighted
@@ -289,8 +299,8 @@ class Strategy:
                (side == "SHORT" and indicators.higher_tf_trend == "DOWN"):
                 weighted_score += self.cfg.higher_tf_alignment_bonus
 
-        # Check momentum confirmation
-        momentum_confirmed = self._check_momentum(indicators, side)
+        # Momentum confirmation (pre-computed before confluence)
+        momentum_confirmed = long_momentum if side == "LONG" else short_momentum
 
         signal = Signal(
             symbol=symbol,
@@ -827,19 +837,32 @@ class Strategy:
                 reason=f"OBV falling (slope={indicators.obv_slope:.2f}, distribution)",
             ))
 
-        # 15. Williams %R vote (short-term overbought/oversold)
+        # 15. Williams %R vote (short-term overbought/oversold + partial zones)
         wr = indicators.williams_r
+        wr_partial = cfg.weight_williams_r * 0.5  # half weight for transition zones
         if wr <= cfg.williams_r_oversold:
             votes.append(IndicatorVote(
                 name="williams_r", side="LONG", weight=cfg.weight_williams_r,
                 value=wr,
                 reason=f"Williams %R={wr:.0f} <= {cfg.williams_r_oversold} (oversold)",
             ))
+        elif wr <= cfg.williams_r_oversold + 15:  # transition zone (e.g. -80 to -65)
+            votes.append(IndicatorVote(
+                name="williams_r", side="LONG", weight=wr_partial,
+                value=wr,
+                reason=f"Williams %R={wr:.0f} near oversold (partial)",
+            ))
         elif wr >= cfg.williams_r_overbought:
             votes.append(IndicatorVote(
                 name="williams_r", side="SHORT", weight=cfg.weight_williams_r,
                 value=wr,
                 reason=f"Williams %R={wr:.0f} >= {cfg.williams_r_overbought} (overbought)",
+            ))
+        elif wr >= cfg.williams_r_overbought - 15:  # transition zone (e.g. -35 to -20)
+            votes.append(IndicatorVote(
+                name="williams_r", side="SHORT", weight=wr_partial,
+                value=wr,
+                reason=f"Williams %R={wr:.0f} near overbought (partial)",
             ))
 
         # 16. TTM Squeeze vote (BB inside KC = breakout imminent)

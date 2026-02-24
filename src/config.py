@@ -171,6 +171,7 @@ class Settings(BaseSettings):
     # ── Momentum Quality Filter ──────────────────────────────
     require_momentum_confirmation: bool = True
     momentum_bonus_weight: float = 10.0
+    no_momentum_discount: float = 0.7  # weighted score multiplier when momentum missing
 
     # ── Session/Funding Time Awareness ────────────────────────
     avoid_funding_window: bool = True
