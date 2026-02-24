@@ -35,7 +35,9 @@ def _compute_tp_sl_bps(
     cfg: Settings, snap: SymbolSnapshot, entry_price: float,
     trade_type: str = "scalp",
 ) -> tuple[float, float]:
-    """Compute SL/TP bps (ATR-based when enabled). Swing uses wider values."""
+    """Compute SL/TP bps (ATR-based when enabled). Swing uses wider values.
+    TP is floored so that after fees we have at least min_tp_net_bps net profit.
+    """
     is_swing = trade_type == "swing"
     base_sl = cfg.swing_sl_bps if is_swing else cfg.sl_bps
     base_tp = cfg.swing_tp_bps if is_swing else cfg.tp_bps
@@ -46,8 +48,15 @@ def _compute_tp_sl_bps(
         atr_bps = (snap.indicators.atr / entry_price) * 10_000
         sl_bps = max(atr_bps * atr_sl_mult, cfg.min_sl_bps)
         tp_bps = max(atr_bps * atr_tp_mult, cfg.min_tp_bps)
-        return sl_bps, tp_bps
-    return base_sl, base_tp
+    else:
+        sl_bps = base_sl
+        tp_bps = base_tp
+
+    # Floor TP so that after round-trip fees we have at least min_tp_net_bps net profit
+    round_trip_fee_bps = 2.0 * cfg.fee_rate_bps
+    tp_floor = round_trip_fee_bps + getattr(cfg, "min_tp_net_bps", 10.0)
+    tp_bps = max(tp_bps, tp_floor)
+    return sl_bps, tp_bps
 
 
 def _estimate_liquidation_price(
@@ -112,7 +121,7 @@ class ExecutionAdapter(abc.ABC):
         signal: Signal,
         snap: SymbolSnapshot,
         qty: float,
-        current_total_notional: float,
+        current_total_margin: float,
         leverage_override: int | None = None,
     ) -> OrderResult | None:
         """Execute a signal: entry + SL + TP. leverage_override: use when high-conviction (e.g. 5x)."""
@@ -150,7 +159,7 @@ class PaperExecution(ExecutionAdapter):
         signal: Signal,
         snap: SymbolSnapshot,
         qty: float,
-        current_total_notional: float,
+        current_total_margin: float,
         leverage_override: int | None = None,
     ) -> OrderResult | None:
         """Simulate entry fill + place SL/TP. leverage_override unused in paper (qty already scaled)."""
@@ -774,7 +783,7 @@ class LiveExecution(ExecutionAdapter):
         signal: Signal,
         snap: SymbolSnapshot,
         qty: float,
-        current_total_notional: float,
+        current_total_margin: float,
         leverage_override: int | None = None,
     ) -> OrderResult | None:
         """Place a live entry order + SL + TP. leverage_override: e.g. 5 for high-conviction."""

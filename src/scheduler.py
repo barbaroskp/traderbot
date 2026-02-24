@@ -344,7 +344,7 @@ class Scheduler:
                     signal=sig,
                     snap=snap,
                     qty=qty,
-                    current_total_notional=current_margin,
+                    current_total_margin=current_margin,
                     leverage_override=effective_leverage,
                 )
                 if result:
