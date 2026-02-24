@@ -29,6 +29,10 @@ class DepthSnapshot:
     ask_depth_usdt: float = 0.0
     mid_price: float = 0.0
     imbalance_ratio: float = 0.0  # bid_depth / (bid + ask), >0.5 = bid heavy
+    # ── Whale detection ──
+    whale_bid_usdt: float = 0.0      # total whale order volume on bid side
+    whale_ask_usdt: float = 0.0      # total whale order volume on ask side
+    whale_imbalance: float = 0.5     # whale_bid / (whale_bid + whale_ask)
 
 
 @dataclass
@@ -93,6 +97,9 @@ class Indicators:
     # ── Price Velocity / Acceleration ──
     price_velocity_bps: float = 0.0  # avg bps change per bar
     price_acceleration: float = 0.0  # change in velocity
+    # ── Liquidation Cascade Detection ──
+    liq_cascade_signal: str = "NONE"  # LONG_LIQ, SHORT_SQUEEZE, NONE
+    liq_cascade_intensity: float = 0.0  # 0-1, strength of cascade signal
 
 
 @dataclass
@@ -106,6 +113,9 @@ class SymbolSnapshot:
     bid_depth_usdt: float = 0.0
     ask_depth_usdt: float = 0.0
     imbalance_ratio: float = 0.0
+    whale_bid_usdt: float = 0.0
+    whale_ask_usdt: float = 0.0
+    whale_imbalance: float = 0.5
     fast_ema: float = 0.0
     slow_ema: float = 0.0
     z_score_bps: float = 0.0
@@ -121,6 +131,26 @@ class EMAState:
     fast: float = 0.0
     slow: float = 0.0
     count: int = 0  # number of data points fed
+
+
+def _detect_liquidation_cascade(ind: "Indicators") -> None:
+    """Detect liquidation cascades from OI change + price velocity.
+
+    - OI dropping sharply + price falling fast → long liquidation cascade
+    - OI dropping sharply + price rising fast  → short squeeze
+    Intensity = min(1.0, |oi_change| / 5 * |velocity| / 100) as 0-1 score.
+    """
+    oi_chg = ind.oi_change_pct
+    vel = ind.price_velocity_bps
+    # Need meaningful OI drop (> 2%) and price movement (> 20 bps/bar)
+    if oi_chg < -2.0 and abs(vel) > 20:
+        intensity = min(1.0, (abs(oi_chg) / 5.0) * (abs(vel) / 100.0))
+        if vel < 0:
+            ind.liq_cascade_signal = "LONG_LIQ"
+            ind.liq_cascade_intensity = intensity
+        else:
+            ind.liq_cascade_signal = "SHORT_SQUEEZE"
+            ind.liq_cascade_intensity = intensity
 
 
 class MarketData:
@@ -161,11 +191,26 @@ class MarketData:
         spread_bps = ((best_ask - best_bid) / mid) * 10_000 if mid > 0 else 9999
 
         # Depth in USDT (top N levels)
-        bid_depth = sum(float(b[0]) * float(b[1]) for b in bids[:10])
-        ask_depth = sum(float(a[0]) * float(a[1]) for a in asks[:10])
+        bid_sizes = [float(b[0]) * float(b[1]) for b in bids[:10]]
+        ask_sizes = [float(a[0]) * float(a[1]) for a in asks[:10]]
+        bid_depth = sum(bid_sizes)
+        ask_depth = sum(ask_sizes)
         total_depth = bid_depth + ask_depth
 
         imbalance = bid_depth / total_depth if total_depth > 0 else 0.5
+
+        # Whale detection: orders > 3x median size
+        all_sizes = bid_sizes + ask_sizes
+        if all_sizes:
+            sorted_sizes = sorted(all_sizes)
+            median_size = sorted_sizes[len(sorted_sizes) // 2]
+            whale_threshold = median_size * 3.0
+            whale_bid = sum(s for s in bid_sizes if s >= whale_threshold)
+            whale_ask = sum(s for s in ask_sizes if s >= whale_threshold)
+            whale_total = whale_bid + whale_ask
+            whale_imb = whale_bid / whale_total if whale_total > 0 else 0.5
+        else:
+            whale_bid, whale_ask, whale_imb = 0.0, 0.0, 0.5
 
         return DepthSnapshot(
             best_bid=best_bid,
@@ -175,6 +220,9 @@ class MarketData:
             ask_depth_usdt=ask_depth,
             mid_price=mid,
             imbalance_ratio=imbalance,
+            whale_bid_usdt=whale_bid,
+            whale_ask_usdt=whale_ask,
+            whale_imbalance=whale_imb,
         )
 
     # ── Price fetchers ─────────────────────────────────────────
@@ -944,6 +992,9 @@ class MarketData:
                 snap.ask_depth_usdt = depth.ask_depth_usdt
                 snap.mid_price = depth.mid_price
                 snap.imbalance_ratio = depth.imbalance_ratio
+                snap.whale_bid_usdt = depth.whale_bid_usdt
+                snap.whale_ask_usdt = depth.whale_ask_usdt
+                snap.whale_imbalance = depth.whale_imbalance
             idx += 1
 
         # Premium index -> mark price + funding
@@ -979,6 +1030,8 @@ class MarketData:
             if not isinstance(oi_result, Exception) and isinstance(oi_result, tuple):
                 snap.indicators.open_interest = oi_result[0]
                 snap.indicators.oi_change_pct = oi_result[1]
+                # Liquidation cascade detection
+                _detect_liquidation_cascade(snap.indicators)
             idx += 1
 
         # Use kline-based EMA as primary (reliable, no warmup bug)
@@ -1051,6 +1104,9 @@ class MarketData:
             snap.ask_depth_usdt = depth.ask_depth_usdt
             snap.mid_price = depth.mid_price
             snap.imbalance_ratio = depth.imbalance_ratio
+            snap.whale_bid_usdt = depth.whale_bid_usdt
+            snap.whale_ask_usdt = depth.whale_ask_usdt
+            snap.whale_imbalance = depth.whale_imbalance
 
         # Mark price + funding
         premium = results[1]
@@ -1081,6 +1137,7 @@ class MarketData:
             if not isinstance(oi_result, Exception) and isinstance(oi_result, tuple):
                 snap.indicators.open_interest = oi_result[0]
                 snap.indicators.oi_change_pct = oi_result[1]
+                _detect_liquidation_cascade(snap.indicators)
 
         # EMA from swing klines
         if snap.indicators.valid and snap.indicators.kline_fast_ema > 0:

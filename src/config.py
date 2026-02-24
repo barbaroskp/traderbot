@@ -168,6 +168,14 @@ class Settings(BaseSettings):
     velocity_lookback: int = 5
     velocity_threshold_bps: float = 30.0  # min velocity bps/bar to count
 
+    # Whale Detection
+    weight_whale: float = 12.0
+    whale_imbalance_threshold: float = 0.65  # >0.65 bid-heavy, <0.35 ask-heavy
+
+    # Liquidation Cascade Detection
+    weight_liq_cascade: float = 15.0
+    liq_cascade_min_intensity: float = 0.3  # minimum intensity to trigger vote
+
     # ── Momentum Quality Filter ──────────────────────────────
     require_momentum_confirmation: bool = True
     momentum_bonus_weight: float = 10.0

@@ -1,6 +1,6 @@
 """Multi-indicator confluence strategy – optimized for maximum profitability.
 
-Signal generation uses 18 independent indicators that each "vote" for LONG, SHORT, or NEUTRAL.
+Signal generation uses 20 independent indicators that each "vote" for LONG, SHORT, or NEUTRAL.
 A trade is only taken when enough indicators agree (confluence).
 
 Indicators:
@@ -22,6 +22,8 @@ Indicators:
   16. TTM Squeeze: Bollinger inside Keltner = low vol breakout imminent
   17. Open Interest: OI change + price direction = manipulation detection
   18. Price Velocity: Rate of price change confirms momentum or warns of reversal
+  19. Whale Detection: Large orders in orderbook (bid/ask walls) indicate support/resistance
+  20. Liquidation Cascade: OI drop + price movement = forced liquidations or squeezes
 
 Additional filters & bonuses:
   - Funding time avoidance (±30 min around 00/08/16 UTC)
@@ -952,6 +954,42 @@ class Strategy:
                     reason=f"velocity {vel:.1f}bps/bar accel={accel:.1f} (bearish momentum)",
                 ))
             # Deceleration = potential reversal, don't vote (let other indicators decide)
+
+        # 19. Whale Detection vote (large orders in orderbook)
+        whale_imb = snap.whale_imbalance
+        whale_total = snap.whale_bid_usdt + snap.whale_ask_usdt
+        if whale_total > 0:  # whales detected
+            if whale_imb >= cfg.whale_imbalance_threshold:
+                votes.append(IndicatorVote(
+                    name="whale", side="LONG", weight=cfg.weight_whale,
+                    value=whale_imb,
+                    reason=f"whale bid wall (imbalance={whale_imb:.2f}, bid={snap.whale_bid_usdt:.0f}$)",
+                ))
+            elif whale_imb <= (1.0 - cfg.whale_imbalance_threshold):
+                votes.append(IndicatorVote(
+                    name="whale", side="SHORT", weight=cfg.weight_whale,
+                    value=whale_imb,
+                    reason=f"whale ask wall (imbalance={whale_imb:.2f}, ask={snap.whale_ask_usdt:.0f}$)",
+                ))
+
+        # 20. Liquidation Cascade Detection vote
+        if (indicators.liq_cascade_signal != "NONE"
+                and indicators.liq_cascade_intensity >= cfg.liq_cascade_min_intensity):
+            intensity = indicators.liq_cascade_intensity
+            if indicators.liq_cascade_signal == "LONG_LIQ":
+                # Long liquidation cascade = more downside pressure → SHORT
+                votes.append(IndicatorVote(
+                    name="liq_cascade", side="SHORT", weight=cfg.weight_liq_cascade * intensity,
+                    value=indicators.oi_change_pct,
+                    reason=f"long liquidation cascade (OI {indicators.oi_change_pct:.1f}%, intensity={intensity:.2f})",
+                ))
+            elif indicators.liq_cascade_signal == "SHORT_SQUEEZE":
+                # Short squeeze = upside pressure → LONG
+                votes.append(IndicatorVote(
+                    name="liq_cascade", side="LONG", weight=cfg.weight_liq_cascade * intensity,
+                    value=indicators.oi_change_pct,
+                    reason=f"short squeeze (OI {indicators.oi_change_pct:.1f}%, intensity={intensity:.2f})",
+                ))
 
         return votes
 
