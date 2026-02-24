@@ -22,6 +22,7 @@ Flow per symbol:
 from __future__ import annotations
 
 import asyncio
+import itertools
 import math
 import sys
 from dataclasses import dataclass, field
@@ -674,6 +675,151 @@ class BacktestEngine:
         return report
 
 
+# ── Parameter Optimizer ──────────────────────────────────────────────────────
+
+
+@dataclass
+class OptimizationResult:
+    """Single parameter combination result."""
+    params: dict[str, float]
+    pnl_pct: float
+    sharpe: float
+    win_rate: float
+    total_trades: int
+    max_drawdown_pct: float
+    score: float  # composite fitness score
+
+
+class ParameterOptimizer:
+    """Grid search optimizer over backtest engine.
+
+    Usage:
+        optimizer = ParameterOptimizer(
+            base_cfg=Settings(),
+            symbols=["BTC-USDT", "ETH-USDT"],
+            days=30,
+            param_grid={
+                "tp_bps": [80, 100, 120, 150],
+                "sl_bps": [40, 50, 60, 80],
+                "min_confluence": [2, 3, 4],
+            },
+        )
+        results = await optimizer.run()
+    """
+
+    def __init__(
+        self,
+        base_cfg: Settings,
+        symbols: list[str],
+        days: int = 30,
+        initial_capital: float | None = None,
+        param_grid: dict[str, list[float]] | None = None,
+        metric: str = "score",  # score, pnl_pct, sharpe
+    ) -> None:
+        self.base_cfg = base_cfg
+        self.symbols = symbols
+        self.days = days
+        self.initial_capital = initial_capital
+        self.metric = metric
+
+        # Default grid if none provided
+        self.param_grid = param_grid or {
+            "tp_bps": [80, 100, 120, 150],
+            "sl_bps": [40, 50, 60, 80],
+            "min_confluence": [2, 3, 4],
+        }
+
+    def _generate_combinations(self) -> list[dict[str, float]]:
+        """Generate all parameter combinations from grid."""
+        keys = list(self.param_grid.keys())
+        values = list(self.param_grid.values())
+        combos = []
+        for combo in itertools.product(*values):
+            combos.append(dict(zip(keys, combo)))
+        return combos
+
+    @staticmethod
+    def _compute_score(report: BacktestReport) -> float:
+        """Composite fitness: balance PnL, Sharpe, win rate, and drawdown."""
+        if report.total_trades < 5:
+            return -999.0  # not enough trades
+        pnl_score = report.total_pnl_pct
+        sharpe_score = report.sharpe_ratio * 10  # scale sharpe
+        dd_penalty = report.max_drawdown_pct * 0.5  # penalize drawdown
+        wr_bonus = (report.win_rate - 50) * 0.2  # bonus for >50% WR
+        return pnl_score + sharpe_score - dd_penalty + wr_bonus
+
+    async def run(self) -> list[OptimizationResult]:
+        """Run grid search and return sorted results."""
+        combos = self._generate_combinations()
+        total = len(combos)
+        print(f"\n{'='*60}")
+        print(f"  PARAMETER OPTIMIZER")
+        print(f"  Symbols: {', '.join(self.symbols)}")
+        print(f"  Period: {self.days} days")
+        print(f"  Parameters: {list(self.param_grid.keys())}")
+        print(f"  Combinations: {total}")
+        print(f"{'='*60}\n")
+
+        results: list[OptimizationResult] = []
+        for i, params in enumerate(combos, 1):
+            cfg = self.base_cfg.model_copy(update=params)
+            engine = BacktestEngine(
+                cfg=cfg,
+                symbols=self.symbols,
+                days=self.days,
+                initial_capital=self.initial_capital,
+            )
+            # Suppress print output during optimization
+            import io
+            import contextlib
+            f = io.StringIO()
+            with contextlib.redirect_stdout(f):
+                report = await engine.run()
+
+            score = self._compute_score(report)
+            result = OptimizationResult(
+                params=params,
+                pnl_pct=report.total_pnl_pct,
+                sharpe=report.sharpe_ratio,
+                win_rate=report.win_rate,
+                total_trades=report.total_trades,
+                max_drawdown_pct=report.max_drawdown_pct,
+                score=score,
+            )
+            results.append(result)
+
+            # Progress
+            marker = "***" if i <= 3 or score > 0 else "   "
+            print(
+                f"  [{i:3d}/{total}] {marker} "
+                f"PnL={report.total_pnl_pct:+6.2f}% "
+                f"Sharpe={report.sharpe_ratio:+5.2f} "
+                f"WR={report.win_rate:5.1f}% "
+                f"DD={report.max_drawdown_pct:5.1f}% "
+                f"Trades={report.total_trades:3d} "
+                f"Score={score:+7.2f} "
+                f"| {params}"
+            )
+
+        # Sort by chosen metric
+        sort_key = self.metric if self.metric != "score" else "score"
+        results.sort(key=lambda r: getattr(r, sort_key), reverse=True)
+
+        # Print top 5
+        print(f"\n{'='*60}")
+        print(f"  TOP 5 PARAMETER COMBINATIONS (by {self.metric})")
+        print(f"{'='*60}")
+        for rank, r in enumerate(results[:5], 1):
+            print(f"\n  #{rank}: Score={r.score:+.2f}")
+            print(f"    PnL: {r.pnl_pct:+.2f}% | Sharpe: {r.sharpe:+.2f} | WR: {r.win_rate:.1f}%")
+            print(f"    DD: {r.max_drawdown_pct:.1f}% | Trades: {r.total_trades}")
+            print(f"    Params: {r.params}")
+        print()
+
+        return results
+
+
 # ── Report printer ───────────────────────────────────────────────────────────
 
 
@@ -797,6 +943,18 @@ async def main() -> None:
         action="store_true",
         help="Save trade log as CSV",
     )
+    parser.add_argument(
+        "--optimize",
+        action="store_true",
+        help="Run parameter optimization grid search",
+    )
+    parser.add_argument(
+        "--opt-metric",
+        type=str,
+        default="score",
+        choices=["score", "pnl_pct", "sharpe", "win_rate"],
+        help="Metric to optimize for (default: composite score)",
+    )
 
     args = parser.parse_args()
 
@@ -811,17 +969,27 @@ async def main() -> None:
 
     symbols = [s.strip() for s in args.symbols.split(",")]
 
-    engine = BacktestEngine(
-        cfg=cfg,
-        symbols=symbols,
-        days=args.days,
-        initial_capital=args.capital,
-    )
-    report = await engine.run()
-    print_report(report)
+    if args.optimize:
+        optimizer = ParameterOptimizer(
+            base_cfg=cfg,
+            symbols=symbols,
+            days=args.days,
+            initial_capital=args.capital,
+            metric=args.opt_metric,
+        )
+        await optimizer.run()
+    else:
+        engine = BacktestEngine(
+            cfg=cfg,
+            symbols=symbols,
+            days=args.days,
+            initial_capital=args.capital,
+        )
+        report = await engine.run()
+        print_report(report)
 
-    if args.csv:
-        save_report_csv(report)
+        if args.csv:
+            save_report_csv(report)
 
 
 if __name__ == "__main__":

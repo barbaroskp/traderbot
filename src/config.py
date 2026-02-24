@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     """Application-wide configuration – single source of truth."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=Path(__file__).resolve().parent.parent / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -168,9 +168,26 @@ class Settings(BaseSettings):
     velocity_lookback: int = 5
     velocity_threshold_bps: float = 30.0  # min velocity bps/bar to count
 
+    # Whale Detection
+    weight_whale: float = 12.0
+    whale_imbalance_threshold: float = 0.65  # >0.65 bid-heavy, <0.35 ask-heavy
+
+    # Liquidation Cascade Detection
+    weight_liq_cascade: float = 15.0
+    liq_cascade_min_intensity: float = 0.3  # minimum intensity to trigger vote
+
+    # Volume Profile
+    weight_volume_profile: float = 10.0
+
+    # Sentiment Analysis
+    use_sentiment: bool = True
+    weight_sentiment: float = 10.0
+    sentiment_threshold: float = 20.0  # min absolute composite score to trigger vote
+
     # ── Momentum Quality Filter ──────────────────────────────
     require_momentum_confirmation: bool = True
     momentum_bonus_weight: float = 10.0
+    no_momentum_discount: float = 0.7  # weighted score multiplier when momentum missing
 
     # ── Session/Funding Time Awareness ────────────────────────
     avoid_funding_window: bool = True

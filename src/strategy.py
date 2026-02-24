@@ -1,6 +1,6 @@
 """Multi-indicator confluence strategy – optimized for maximum profitability.
 
-Signal generation uses 18 independent indicators that each "vote" for LONG, SHORT, or NEUTRAL.
+Signal generation uses 22 independent indicators that each "vote" for LONG, SHORT, or NEUTRAL.
 A trade is only taken when enough indicators agree (confluence).
 
 Indicators:
@@ -22,6 +22,10 @@ Indicators:
   16. TTM Squeeze: Bollinger inside Keltner = low vol breakout imminent
   17. Open Interest: OI change + price direction = manipulation detection
   18. Price Velocity: Rate of price change confirms momentum or warns of reversal
+  19. Whale Detection: Large orders in orderbook (bid/ask walls) indicate support/resistance
+  20. Liquidation Cascade: OI drop + price movement = forced liquidations or squeezes
+  21. Volume Profile: POC/VAH/VAL as support/resistance, breakout detection
+  22. Composite Sentiment: Funding rate + OI + taker ratio + Fear & Greed Index
 
 Additional filters & bonuses:
   - Funding time avoidance (±30 min around 00/08/16 UTC)
@@ -221,6 +225,16 @@ class Strategy:
         long_weighted = sum(v.weight for v in long_votes)
         short_weighted = sum(v.weight for v in short_votes)
 
+        # Pre-compute momentum for both sides so it influences confluence
+        long_momentum = self._check_momentum(indicators, "LONG")
+        short_momentum = self._check_momentum(indicators, "SHORT")
+        if self.cfg.require_momentum_confirmation and indicators.valid:
+            no_mom_discount = getattr(self.cfg, "no_momentum_discount", 0.7)
+            if not long_momentum:
+                long_weighted *= no_mom_discount
+            if not short_momentum:
+                short_weighted *= no_mom_discount
+
         # Confluence rule: mode-aware EMA anchor
         require_ema = self._require_ema_for_mode(mode)
         ema_vote = next((v for v in votes if v.name == "ema_zscore"), None)
@@ -229,11 +243,11 @@ class Strategy:
             if not ema_vote or ema_vote.side == "NEUTRAL":
                 return None
             # EMA voted LONG or SHORT; need at least one other indicator agreeing
-            if ema_vote.side == "LONG" and long_score >= 2 and long_score > short_score:
+            if ema_vote.side == "LONG" and long_score >= 2 and long_weighted > short_weighted:
                 side = "LONG"
                 confluence_score = long_score
                 weighted_score = long_weighted
-            elif ema_vote.side == "SHORT" and short_score >= 2 and short_score > long_score:
+            elif ema_vote.side == "SHORT" and short_score >= 2 and short_weighted > long_weighted:
                 side = "SHORT"
                 confluence_score = short_score
                 weighted_score = short_weighted
@@ -247,11 +261,11 @@ class Strategy:
         )
 
         if not require_ema:
-            if long_score >= effective_min_confluence and long_score > short_score:
+            if long_score >= effective_min_confluence and long_weighted > short_weighted:
                 side = "LONG"
                 confluence_score = long_score
                 weighted_score = long_weighted
-            elif short_score >= effective_min_confluence and short_score > long_score:
+            elif short_score >= effective_min_confluence and short_weighted > long_weighted:
                 side = "SHORT"
                 confluence_score = short_score
                 weighted_score = short_weighted
@@ -289,8 +303,8 @@ class Strategy:
                (side == "SHORT" and indicators.higher_tf_trend == "DOWN"):
                 weighted_score += self.cfg.higher_tf_alignment_bonus
 
-        # Check momentum confirmation
-        momentum_confirmed = self._check_momentum(indicators, side)
+        # Momentum confirmation (pre-computed before confluence)
+        momentum_confirmed = long_momentum if side == "LONG" else short_momentum
 
         signal = Signal(
             symbol=symbol,
@@ -827,19 +841,32 @@ class Strategy:
                 reason=f"OBV falling (slope={indicators.obv_slope:.2f}, distribution)",
             ))
 
-        # 15. Williams %R vote (short-term overbought/oversold)
+        # 15. Williams %R vote (short-term overbought/oversold + partial zones)
         wr = indicators.williams_r
+        wr_partial = cfg.weight_williams_r * 0.5  # half weight for transition zones
         if wr <= cfg.williams_r_oversold:
             votes.append(IndicatorVote(
                 name="williams_r", side="LONG", weight=cfg.weight_williams_r,
                 value=wr,
                 reason=f"Williams %R={wr:.0f} <= {cfg.williams_r_oversold} (oversold)",
             ))
+        elif wr <= cfg.williams_r_oversold + 15:  # transition zone (e.g. -80 to -65)
+            votes.append(IndicatorVote(
+                name="williams_r", side="LONG", weight=wr_partial,
+                value=wr,
+                reason=f"Williams %R={wr:.0f} near oversold (partial)",
+            ))
         elif wr >= cfg.williams_r_overbought:
             votes.append(IndicatorVote(
                 name="williams_r", side="SHORT", weight=cfg.weight_williams_r,
                 value=wr,
                 reason=f"Williams %R={wr:.0f} >= {cfg.williams_r_overbought} (overbought)",
+            ))
+        elif wr >= cfg.williams_r_overbought - 15:  # transition zone (e.g. -35 to -20)
+            votes.append(IndicatorVote(
+                name="williams_r", side="SHORT", weight=wr_partial,
+                value=wr,
+                reason=f"Williams %R={wr:.0f} near overbought (partial)",
             ))
 
         # 16. TTM Squeeze vote (BB inside KC = breakout imminent)
@@ -929,6 +956,95 @@ class Strategy:
                     reason=f"velocity {vel:.1f}bps/bar accel={accel:.1f} (bearish momentum)",
                 ))
             # Deceleration = potential reversal, don't vote (let other indicators decide)
+
+        # 19. Whale Detection vote (large orders in orderbook)
+        whale_imb = snap.whale_imbalance
+        whale_total = snap.whale_bid_usdt + snap.whale_ask_usdt
+        if whale_total > 0:  # whales detected
+            if whale_imb >= cfg.whale_imbalance_threshold:
+                votes.append(IndicatorVote(
+                    name="whale", side="LONG", weight=cfg.weight_whale,
+                    value=whale_imb,
+                    reason=f"whale bid wall (imbalance={whale_imb:.2f}, bid={snap.whale_bid_usdt:.0f}$)",
+                ))
+            elif whale_imb <= (1.0 - cfg.whale_imbalance_threshold):
+                votes.append(IndicatorVote(
+                    name="whale", side="SHORT", weight=cfg.weight_whale,
+                    value=whale_imb,
+                    reason=f"whale ask wall (imbalance={whale_imb:.2f}, ask={snap.whale_ask_usdt:.0f}$)",
+                ))
+
+        # 20. Liquidation Cascade Detection vote
+        if (indicators.liq_cascade_signal != "NONE"
+                and indicators.liq_cascade_intensity >= cfg.liq_cascade_min_intensity):
+            intensity = indicators.liq_cascade_intensity
+            if indicators.liq_cascade_signal == "LONG_LIQ":
+                # Long liquidation cascade = more downside pressure → SHORT
+                votes.append(IndicatorVote(
+                    name="liq_cascade", side="SHORT", weight=cfg.weight_liq_cascade * intensity,
+                    value=indicators.oi_change_pct,
+                    reason=f"long liquidation cascade (OI {indicators.oi_change_pct:.1f}%, intensity={intensity:.2f})",
+                ))
+            elif indicators.liq_cascade_signal == "SHORT_SQUEEZE":
+                # Short squeeze = upside pressure → LONG
+                votes.append(IndicatorVote(
+                    name="liq_cascade", side="LONG", weight=cfg.weight_liq_cascade * intensity,
+                    value=indicators.oi_change_pct,
+                    reason=f"short squeeze (OI {indicators.oi_change_pct:.1f}%, intensity={intensity:.2f})",
+                ))
+
+        # 21. Volume Profile vote (POC as support/resistance)
+        poc = indicators.volume_profile_poc
+        if poc > 0 and indicators.price_vs_poc_bps != 0:
+            dist = abs(indicators.price_vs_poc_bps)
+            if dist < 50:  # price near POC (within 50 bps = ~0.5%)
+                if indicators.price_in_value_area:
+                    # Inside value area near POC → mean reversion toward POC
+                    if indicators.price_vs_poc_bps > 0:
+                        votes.append(IndicatorVote(
+                            name="volume_profile", side="SHORT",
+                            weight=cfg.weight_volume_profile * 0.7,
+                            value=indicators.price_vs_poc_bps,
+                            reason=f"price above POC by {indicators.price_vs_poc_bps:.0f}bps (revert to POC)",
+                        ))
+                    else:
+                        votes.append(IndicatorVote(
+                            name="volume_profile", side="LONG",
+                            weight=cfg.weight_volume_profile * 0.7,
+                            value=indicators.price_vs_poc_bps,
+                            reason=f"price below POC by {indicators.price_vs_poc_bps:.0f}bps (revert to POC)",
+                        ))
+            elif not indicators.price_in_value_area:
+                # Outside value area → breakout or rejection
+                if indicators.price_vs_poc_bps > 100:
+                    # Well above VA → strong breakout bullish
+                    votes.append(IndicatorVote(
+                        name="volume_profile", side="LONG",
+                        weight=cfg.weight_volume_profile,
+                        value=indicators.price_vs_poc_bps,
+                        reason=f"price broke above value area (+{indicators.price_vs_poc_bps:.0f}bps)",
+                    ))
+                elif indicators.price_vs_poc_bps < -100:
+                    # Well below VA → strong breakout bearish
+                    votes.append(IndicatorVote(
+                        name="volume_profile", side="SHORT",
+                        weight=cfg.weight_volume_profile,
+                        value=indicators.price_vs_poc_bps,
+                        reason=f"price broke below value area ({indicators.price_vs_poc_bps:.0f}bps)",
+                    ))
+
+        # 22. Composite Sentiment vote
+        sentiment = indicators.composite_sentiment
+        if abs(sentiment) >= cfg.sentiment_threshold:
+            side = "LONG" if sentiment > 0 else "SHORT"
+            # Scale weight by how extreme the sentiment is (20→100 maps to 0.5→1.0)
+            intensity = min(1.0, abs(sentiment) / 80.0 + 0.25)
+            votes.append(IndicatorVote(
+                name="sentiment", side=side,
+                weight=cfg.weight_sentiment * intensity,
+                value=sentiment,
+                reason=f"composite sentiment {sentiment:+.1f} (F&G={indicators.fear_greed_index:.0f})",
+            ))
 
         return votes
 
