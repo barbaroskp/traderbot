@@ -283,28 +283,34 @@ class Strategy:
         )
         breakout_confirmed = breakout_up or breakout_down
 
-        # Funding contrarian bonus – scale with funding rate magnitude
-        # Higher funding = bigger bonus (funding farming: earn funding payments)
-        if self.cfg.funding_contra_bonus > 0 and abs(snap.funding_rate) >= self.cfg.funding_rate_threshold:
-            # Scale bonus: base + extra for very high funding rates
-            funding_magnitude = abs(snap.funding_rate) / self.cfg.funding_rate_threshold
-            scaled_bonus = self.cfg.funding_contra_bonus * min(funding_magnitude, 3.0)
-            if side == "SHORT" and snap.funding_rate > 0:
-                weighted_score += scaled_bonus
-            elif side == "LONG" and snap.funding_rate < 0:
-                weighted_score += scaled_bonus
+        # Momentum confirmation (pre-computed before confluence)
+        momentum_confirmed = long_momentum if side == "LONG" else short_momentum
 
-        # ── Signal strength bonus: reward indicator extremity ──
+        # ── Normalize weighted score to 0-100 scale ──────────────
+        # Raw score can reach ~350+ because each indicator contributes its
+        # full config weight.  Normalize by dividing by the maximum possible
+        # weight of the indicators that actually voted on the winning side.
+        weighted_score, _raw = self._normalize_weighted_score(votes, side)
+        # Apply momentum discount on normalized score (same effect as before)
+        if self.cfg.require_momentum_confirmation and indicators.valid:
+            if not momentum_confirmed:
+                no_mom_discount = getattr(self.cfg, "no_momentum_discount", 0.7)
+                weighted_score *= no_mom_discount
+        # Bonuses (extremity, higher-TF, funding) are applied *on top* as
+        # additive points on the 0-100 scale – they represent conviction
+        # beyond base indicator agreement.
         weighted_score += self._compute_extremity_bonus(indicators, side)
-
-        # ── Higher-TF alignment bonus: 15m trend confirms 5m signal ──
         if self.cfg.higher_tf_alignment_bonus > 0 and indicators.higher_tf_trend != "NEUTRAL":
             if (side == "LONG" and indicators.higher_tf_trend == "UP") or \
                (side == "SHORT" and indicators.higher_tf_trend == "DOWN"):
                 weighted_score += self.cfg.higher_tf_alignment_bonus
-
-        # Momentum confirmation (pre-computed before confluence)
-        momentum_confirmed = long_momentum if side == "LONG" else short_momentum
+        if self.cfg.funding_contra_bonus > 0 and abs(snap.funding_rate) >= self.cfg.funding_rate_threshold:
+            funding_magnitude = abs(snap.funding_rate) / self.cfg.funding_rate_threshold
+            scaled_bonus = self.cfg.funding_contra_bonus * min(funding_magnitude, 3.0)
+            if (side == "SHORT" and snap.funding_rate > 0) or \
+               (side == "LONG" and snap.funding_rate < 0):
+                weighted_score += scaled_bonus
+        weighted_score = min(weighted_score, 100.0)
 
         signal = Signal(
             symbol=symbol,
@@ -1066,6 +1072,85 @@ class Strategy:
             return True
         return False
 
+    # ── Max weight lookup for normalization ──────────────────────
+    # Maps indicator name → config attribute holding its max weight.
+    # Indicators that use multipliers (e.g. 1.5x for divergence, crossover
+    # boost for MACD) are capped at the boosted maximum so normalization
+    # reflects the true ceiling of what a single indicator can contribute.
+    _INDICATOR_WEIGHT_ATTRS: dict[str, str] = {
+        "ema_zscore":      "weight_ema",
+        "rsi":             "weight_rsi",
+        "macd":            "weight_macd",       # can be boosted by macd_crossover_boost
+        "bollinger":       "weight_bollinger",
+        "breakout":        "weight_breakout",
+        "trend":           "weight_trend",
+        "orderbook":       "weight_orderbook",
+        "volume_spike":    "weight_volume_spike",
+        "vwap":            "weight_vwap",
+        "momentum":        "weight_momentum",
+        "rsi_divergence":  "weight_rsi",        # uses weight_rsi * 1.5
+        "stoch_rsi":       "weight_stoch_rsi",
+        "adx":             "weight_adx",
+        "taker_ratio":     "weight_taker_ratio",
+        "obv":             "weight_obv",         # can be 1.5x on divergence
+        "williams_r":      "weight_williams_r",
+        "squeeze":         "weight_squeeze",
+        "open_interest":   "weight_oi",
+        "velocity":        "weight_velocity",
+        "whale":           "weight_whale",
+        "liq_cascade":     "weight_liq_cascade",
+        "volume_profile":  "weight_volume_profile",
+        "sentiment":       "weight_sentiment",
+    }
+
+    # Multiplier caps – the highest multiplier each indicator can apply.
+    _INDICATOR_MAX_MULT: dict[str, float] = {
+        "macd":           1.5,   # macd_crossover_boost default
+        "rsi_divergence": 1.5,   # hardcoded *1.5
+        "obv":            1.5,   # divergence path *1.5
+    }
+
+    def _normalize_weighted_score(
+        self, votes: list[IndicatorVote], side: str,
+    ) -> tuple[float, float]:
+        """Normalize raw weighted score to 0-100 scale.
+
+        Returns (normalized_score, raw_score).
+
+        Normalization = (sum of winning-side weights) / (max possible for
+        those indicator names) × 100.
+
+        This way the score genuinely represents "what percentage of maximum
+        possible conviction did the winning indicators achieve?"
+        """
+        side_votes = [v for v in votes if v.side == side]
+        if not side_votes:
+            return 0.0, 0.0
+
+        raw = sum(v.weight for v in side_votes)
+
+        # Compute max possible for participating indicator names
+        max_possible = 0.0
+        seen: set[str] = set()
+        for v in side_votes:
+            if v.name in seen:
+                continue
+            seen.add(v.name)
+            attr = self._INDICATOR_WEIGHT_ATTRS.get(v.name)
+            if attr:
+                base = getattr(self.cfg, attr, 0.0)
+                mult = self._INDICATOR_MAX_MULT.get(v.name, 1.0)
+                max_possible += base * mult
+            else:
+                # Unknown indicator – use actual weight as ceiling
+                max_possible += v.weight
+
+        if max_possible <= 0:
+            return 0.0, raw
+
+        normalized = (raw / max_possible) * 100.0
+        return min(normalized, 100.0), raw
+
     def _compute_extremity_bonus(self, indicators: Indicators, side: str) -> float:
         """Bonus weight for extreme indicator values (higher conviction)."""
         if not indicators.valid:
@@ -1192,13 +1277,15 @@ class Strategy:
             if len(long_votes) >= cfg.swing_min_confluence and len(long_votes) > len(short_votes):
                 side = "LONG"
                 confluence = len(long_votes)
-                weighted = sum(v.weight for v in long_votes)
             elif len(short_votes) >= cfg.swing_min_confluence and len(short_votes) > len(long_votes):
                 side = "SHORT"
                 confluence = len(short_votes)
-                weighted = sum(v.weight for v in short_votes)
             else:
                 continue
+
+            # Normalize swing weighted score to 0-100
+            weighted, _raw = self._normalize_weighted_score(votes, side)
+            weighted = min(weighted, 100.0)
 
             # 4h trend must align
             if cfg.swing_require_trend_alignment and indicators.higher_tf_trend != "NEUTRAL":

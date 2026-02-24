@@ -82,4 +82,4 @@ class TestConfig:
         assert cfg.require_ema_in_trend_follow is None
         assert cfg.require_ema_in_breakout is None
         assert cfg.min_confluence_no_ema == 3
-        assert cfg.min_weighted_score_no_ema == 70.0
+        assert cfg.min_weighted_score_no_ema == 45.0  # normalized 0-100 scale

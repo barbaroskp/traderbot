@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     margin_mode: MarginMode = MarginMode.ISOLATED
     # High-conviction: all indicators agree → larger position + higher leverage
     high_conviction_min_confluence: int = 5
-    high_conviction_min_weighted_score: float = 70.0   # slightly lower bar (was 75)
+    high_conviction_min_weighted_score: float = 75.0   # 0-100 normalized: 75% of max indicator agreement
     high_conviction_size_multiplier: float = 2.0       # aggressive: 2x size (was 1.5)
     max_trade_notional_high_conviction_usdt: float = 15.0  # bigger cap (was 10)
 
@@ -105,9 +105,9 @@ class Settings(BaseSettings):
     min_confluence_score: int = 2
     # When EMA is not required, demand stronger agreement.
     min_confluence_no_ema: int = 3
-    min_weighted_score_no_ema: float = 70.0
-    risk_tight_min_weighted_score: float = 50.0   # TIGHT: 4/5 ok if score >= this
-    risk_ultra_min_weighted_score: float = 62.0   # ULTRA_TIGHT: 4/5 ok if score >= this
+    min_weighted_score_no_ema: float = 45.0    # 0-100 normalized: need 45% agreement without EMA anchor
+    risk_tight_min_weighted_score: float = 40.0   # TIGHT: only trade if 40%+ indicator agreement
+    risk_ultra_min_weighted_score: float = 55.0   # ULTRA_TIGHT: need 55%+ indicator agreement
     require_trend_not_against: bool = False  # False = trende ters de gir (daha fazla islem)
     trade_with_trend_only: bool = False  # False = trende ters de girebilir (daha fazla islem)
     rsi_full_vote_only: bool = False     # False = RSI orta bolgede de hafif oy verir, daha fazla 3/5 confluence
@@ -120,7 +120,7 @@ class Settings(BaseSettings):
     use_funding_filter: bool = True
     funding_rate_threshold: float = 0.0005
     funding_contra_bonus: float = 5.0
-    # Weights for combined score (total = 100)
+    # Weights for combined score (normalized to 0-100 at scoring time)
     weight_ema: float = 25.0
     weight_rsi: float = 25.0
     weight_macd: float = 20.0
@@ -135,7 +135,7 @@ class Settings(BaseSettings):
     weight_adx: float = 10.0
     stoch_rsi_oversold: float = 20.0
     stoch_rsi_overbought: float = 80.0
-    higher_tf_alignment_bonus: float = 15.0  # weighted score bonus when 15m trend confirms signal
+    higher_tf_alignment_bonus: float = 8.0  # weighted score bonus when 15m trend confirms signal (0-100 scale)
 
     # ── New Indicators (Tier 1+2) ─────────────────────────────
     # Taker Buy/Sell Ratio (proxy from candle direction)
