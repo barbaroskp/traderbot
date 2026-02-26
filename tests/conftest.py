@@ -19,7 +19,7 @@ def cfg() -> Settings:
         bingx_api_secret="test_secret_456",
         paper_mode=True,
         allow_live_trading=False,
-        initial_capital_usdt=16.0,
+        initial_capital_usdt=20.0,
         db_path=":memory:",
         log_level="DEBUG",
         log_file="",
@@ -41,6 +41,6 @@ def cfg_live() -> Settings:
         bingx_api_secret="live_secret",
         paper_mode=False,
         allow_live_trading=True,
-        initial_capital_usdt=16.0,
+        initial_capital_usdt=20.0,
         db_path=":memory:",
     )
