@@ -140,7 +140,14 @@ class RiskManager:
 
         Call this once per scan cycle.
         Returns the new state.
+
+        When ``cfg.risk_state_disabled`` is True, the state machine is
+        completely bypassed and the manager always stays in NORMAL.
         """
+        if self.cfg.risk_state_disabled:
+            self._state = RiskState.NORMAL
+            return self._state
+
         prev = self._state
         dd = self.drawdown_pct
         now = datetime.now(timezone.utc)

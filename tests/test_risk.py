@@ -199,3 +199,40 @@ class TestPositionSizing:
         logs = db.fetch_all("SELECT * FROM risk_state_log")
         assert len(logs) >= 1
         assert logs[-1]["state"] == "TIGHT"
+
+
+class TestRiskStateDisabled:
+    """When risk_state_disabled=True, state must always stay NORMAL."""
+
+    @pytest.fixture()
+    def cfg_disabled(self) -> Settings:
+        return Settings(
+            bingx_api_key="test_key_123",
+            bingx_api_secret="test_secret_456",
+            paper_mode=True,
+            allow_live_trading=False,
+            initial_capital_usdt=20.0,
+            db_path=":memory:",
+            log_level="DEBUG",
+            log_file="",
+            risk_state_disabled=True,
+        )
+
+    def test_stays_normal_despite_losses(self, cfg_disabled, db) -> None:
+        rm = RiskManager(cfg_disabled, db)
+        for _ in range(20):
+            rm.record_trade_result(-0.5)
+        state = rm.evaluate()
+        assert state == RiskState.NORMAL
+
+    def test_stays_normal_despite_api_errors(self, cfg_disabled, db) -> None:
+        rm = RiskManager(cfg_disabled, db)
+        state = rm.evaluate(api_error_rate=0.95)
+        assert state == RiskState.NORMAL
+
+    def test_full_margin_when_disabled(self, cfg_disabled, db) -> None:
+        rm = RiskManager(cfg_disabled, db)
+        for _ in range(20):
+            rm.record_trade_result(-0.5)
+        rm.evaluate()
+        assert rm.get_max_trade_margin() == cfg_disabled.max_trade_margin_usdt
