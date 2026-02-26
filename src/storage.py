@@ -222,6 +222,9 @@ class Storage:
             conn.execute("ALTER TABLE positions ADD COLUMN trade_type TEXT DEFAULT 'scalp'")
         if "max_hold_minutes" not in pos_cols:
             conn.execute("ALTER TABLE positions ADD COLUMN max_hold_minutes INTEGER")
+        # Positions: exit reason tracking (SL/TP/TIMEOUT/MOMENTUM_EXIT/ANTI_LIQUIDATION/TRAILING)
+        if "exit_reason" not in pos_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN exit_reason TEXT")
 
         # Orders: TP level
         if "tp_level" not in ord_cols:
