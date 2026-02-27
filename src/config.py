@@ -258,6 +258,7 @@ class Settings(BaseSettings):
     max_leverage_for_price: bool = True  # auto-reduce leverage if liq price too close
 
     # ── Risk State Thresholds ────────────────────────────────────
+    risk_state_disabled: bool = False  # True = always stay in NORMAL, never escalate
     risk_consec_losses_tight: int = 8
     risk_drawdown_pct_tight: float = 8.0
     risk_drawdown_min_for_consec_tight: float = 2.0
@@ -297,7 +298,7 @@ class Settings(BaseSettings):
 
     # ── Runtime Safety & Maintenance ───────────────────────────
     live_slippage_guard_bps: float = 35.0
-    soft_kill_switch_enabled: bool = True
+    soft_kill_switch_enabled: bool = False
     soft_kill_api_error_rate: float = 0.85
     soft_kill_drawdown_pct: float = 35.0
     soft_kill_min_balance_ratio: float = 0.15

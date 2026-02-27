@@ -18,46 +18,48 @@ class TestRiskStateTransitions:
 
     def test_consecutive_losses_trigger_tight(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
-        # 8 consecutive losses AND drawdown >= 2%
+        # 8 consecutive losses AND drawdown >= 2% (but < 18% to avoid ULTRA)
+        # With 20 USDT: 8 × -0.2 = -1.6 = 8% drawdown → TIGHT
         for _ in range(8):
-            rm.record_trade_result(-0.5)
+            rm.record_trade_result(-0.2)
         state = rm.evaluate()
         assert state == RiskState.TIGHT
 
     def test_fewer_losses_stay_normal(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
-        # 7 losses not enough (threshold 8)
+        # 7 losses not enough (threshold 8), DD = 7% < 8%
         for _ in range(7):
-            rm.record_trade_result(-0.5)
+            rm.record_trade_result(-0.2)
         state = rm.evaluate()
         assert state == RiskState.NORMAL
 
     def test_more_losses_trigger_ultra_tight(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
         # 14 consecutive losses AND dd >= 5%
+        # With 20 USDT: 14 × -0.2 = -2.8 = 14% drawdown
         for _ in range(14):
-            rm.record_trade_result(-0.5)
+            rm.record_trade_result(-0.2)
         state = rm.evaluate()
         assert state == RiskState.ULTRA_TIGHT
 
     def test_drawdown_triggers_tight(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
-        rm._peak_balance = 50
-        rm._current_balance = 44  # 12% drawdown (threshold 8%)
+        rm._peak_balance = 20
+        rm._current_balance = 18  # 10% drawdown (threshold 8%)
         state = rm.evaluate()
         assert state == RiskState.TIGHT
 
     def test_small_drawdown_stays_normal(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
-        rm._peak_balance = 50
-        rm._current_balance = 47  # 6% drawdown (below 8% threshold)
+        rm._peak_balance = 20
+        rm._current_balance = 19  # 5% drawdown (below 8% threshold)
         state = rm.evaluate()
         assert state == RiskState.NORMAL
 
     def test_drawdown_triggers_ultra(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
-        rm._peak_balance = 50
-        rm._current_balance = 39  # 22% drawdown (threshold 18%)
+        rm._peak_balance = 20
+        rm._current_balance = 15.4  # 23% drawdown (threshold 18%)
         state = rm.evaluate()
         assert state == RiskState.ULTRA_TIGHT
 
@@ -69,16 +71,16 @@ class TestRiskStateTransitions:
 
     def test_recovery_from_tight_with_wins(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
-        # Go to TIGHT (8 losses + dd)
+        # Go to TIGHT (8 losses, small amounts to avoid ULTRA)
         for _ in range(8):
-            rm.record_trade_result(-0.5)
+            rm.record_trade_result(-0.2)
         rm.evaluate()
         assert rm.state == RiskState.TIGHT
 
         # Reset losses and win 2 times
         rm._consecutive_losses = 0
-        rm._current_balance = 50
-        rm._peak_balance = 50
+        rm._current_balance = 20
+        rm._peak_balance = 20
         for _ in range(2):
             rm.record_trade_result(0.5)
 
@@ -89,14 +91,14 @@ class TestRiskStateTransitions:
     def test_recovery_from_ultra_to_tight(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
         for _ in range(14):
-            rm.record_trade_result(-0.5)
+            rm.record_trade_result(-0.2)
         rm.evaluate()
         assert rm.state == RiskState.ULTRA_TIGHT
 
         # Win enough to de-escalate (needs 2 wins)
         rm._consecutive_losses = 0
-        rm._current_balance = 50
-        rm._peak_balance = 50
+        rm._current_balance = 20
+        rm._peak_balance = 20
         for _ in range(2):
             rm.record_trade_result(0.5)
         rm.evaluate()
@@ -105,30 +107,30 @@ class TestRiskStateTransitions:
     def test_time_based_recovery_from_tight(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
         for _ in range(8):
-            rm.record_trade_result(-0.5)
+            rm.record_trade_result(-0.2)
         rm.evaluate()
         assert rm.state == RiskState.TIGHT
 
         # Simulate time passing (21 min; threshold 20 min)
         rm._state_entered_at = datetime.now(timezone.utc) - timedelta(minutes=21)
         rm._consecutive_losses = 0  # reset to avoid re-escalation
-        rm._current_balance = 50
-        rm._peak_balance = 50
+        rm._current_balance = 20
+        rm._peak_balance = 20
         rm.evaluate()
         assert rm.state == RiskState.NORMAL
 
     def test_time_based_recovery_from_ultra(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
         for _ in range(14):
-            rm.record_trade_result(-0.5)
+            rm.record_trade_result(-0.2)
         rm.evaluate()
         assert rm.state == RiskState.ULTRA_TIGHT
 
         # Simulate time passing (46 min; threshold 45 min)
         rm._state_entered_at = datetime.now(timezone.utc) - timedelta(minutes=46)
         rm._consecutive_losses = 0
-        rm._current_balance = 50
-        rm._peak_balance = 50
+        rm._current_balance = 20
+        rm._peak_balance = 20
         rm.evaluate()
         assert rm.state == RiskState.TIGHT
 
@@ -189,10 +191,48 @@ class TestPositionSizing:
 
     def test_risk_state_logged(self, cfg, db) -> None:
         rm = RiskManager(cfg, db)
+        # 8 × -0.2 = 8% DD → TIGHT (not ULTRA)
         for _ in range(8):
-            rm.record_trade_result(-0.5)
+            rm.record_trade_result(-0.2)
         rm.evaluate()
 
         logs = db.fetch_all("SELECT * FROM risk_state_log")
         assert len(logs) >= 1
         assert logs[-1]["state"] == "TIGHT"
+
+
+class TestRiskStateDisabled:
+    """When risk_state_disabled=True, state must always stay NORMAL."""
+
+    @pytest.fixture()
+    def cfg_disabled(self) -> Settings:
+        return Settings(
+            bingx_api_key="test_key_123",
+            bingx_api_secret="test_secret_456",
+            paper_mode=True,
+            allow_live_trading=False,
+            initial_capital_usdt=20.0,
+            db_path=":memory:",
+            log_level="DEBUG",
+            log_file="",
+            risk_state_disabled=True,
+        )
+
+    def test_stays_normal_despite_losses(self, cfg_disabled, db) -> None:
+        rm = RiskManager(cfg_disabled, db)
+        for _ in range(20):
+            rm.record_trade_result(-0.5)
+        state = rm.evaluate()
+        assert state == RiskState.NORMAL
+
+    def test_stays_normal_despite_api_errors(self, cfg_disabled, db) -> None:
+        rm = RiskManager(cfg_disabled, db)
+        state = rm.evaluate(api_error_rate=0.95)
+        assert state == RiskState.NORMAL
+
+    def test_full_margin_when_disabled(self, cfg_disabled, db) -> None:
+        rm = RiskManager(cfg_disabled, db)
+        for _ in range(20):
+            rm.record_trade_result(-0.5)
+        rm.evaluate()
+        assert rm.get_max_trade_margin() == cfg_disabled.max_trade_margin_usdt

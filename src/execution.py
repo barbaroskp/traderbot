@@ -625,10 +625,10 @@ class PaperExecution(ExecutionAdapter):
         exit_fee = exit_price * qty * (self.cfg.fee_rate_bps / 10_000)
         pnl -= entry_fee + exit_fee
 
-        # Update position
+        # Update position (store exit_reason for analytics)
         self.db.execute(
-            "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=? WHERE id=?",
-            (pnl, now, pos["id"]),
+            "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=?, exit_reason=? WHERE id=?",
+            (pnl, now, reason, pos["id"]),
         )
 
         # Mark SL/TP orders as cancelled (the one that didn't trigger)
@@ -1271,8 +1271,8 @@ class LiveExecution(ExecutionAdapter):
                 exit_fee = mark * qty * (self.cfg.fee_rate_bps / 10_000)
                 pnl -= entry_fee + exit_fee
                 self.db.execute(
-                    "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=? WHERE id=?",
-                    (pnl, now.isoformat(), pos["id"]),
+                    "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=?, exit_reason=? WHERE id=?",
+                    (pnl, now.isoformat(), "exchange_close", pos["id"]),
                 )
                 closed.append({**pos, "realised_pnl": pnl, "exit_reason": "exchange_close"})
                 continue
@@ -1314,8 +1314,8 @@ class LiveExecution(ExecutionAdapter):
                         exit_fee = mark * exch_qty * (self.cfg.fee_rate_bps / 10_000)
                         pnl -= entry_fee + exit_fee
                         self.db.execute(
-                            "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=? WHERE id=?",
-                            (pnl, now.isoformat(), pos["id"]),
+                            "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=?, exit_reason=? WHERE id=?",
+                            (pnl, now.isoformat(), "ANTI_LIQUIDATION", pos["id"]),
                         )
                         closed.append({**pos, "realised_pnl": pnl, "exit_reason": "ANTI_LIQUIDATION"})
                         continue
@@ -1447,8 +1447,8 @@ class LiveExecution(ExecutionAdapter):
                     exit_fee = mark * exch_qty * (self.cfg.fee_rate_bps / 10_000)
                     pnl -= entry_fee + exit_fee
                     self.db.execute(
-                        "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=? WHERE id=?",
-                        (pnl, now.isoformat(), pos["id"]),
+                        "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=?, exit_reason=? WHERE id=?",
+                        (pnl, now.isoformat(), "MOMENTUM_EXIT", pos["id"]),
                     )
                     closed.append({**pos, "realised_pnl": pnl, "exit_reason": "MOMENTUM_EXIT"})
                     continue
@@ -1475,9 +1475,9 @@ class LiveExecution(ExecutionAdapter):
                     exit_fee = mark * exch_qty * (self.cfg.fee_rate_bps / 10_000)
                     pnl -= entry_fee + exit_fee
                     self.db.execute(
-                        "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=? "
+                        "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=?, exit_reason=? "
                         "WHERE id=?",
-                        (pnl, now.isoformat(), pos["id"]),
+                        (pnl, now.isoformat(), "TIMEOUT", pos["id"]),
                     )
                     closed.append({**pos, "realised_pnl": pnl, "exit_reason": "TIMEOUT"})
                 except BingXClientError as exc:

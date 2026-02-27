@@ -24,7 +24,7 @@ from typing import Any
 
 from src.bingx_client import BingXClient
 from src.config import Settings
-from src.execution import ExecutionAdapter, LiveExecution, PaperExecution
+from src.execution import ExecutionAdapter, LiveExecution, PaperExecution, _compute_tp_sl_bps
 from src.logger import get_logger, setup_logging
 from src.marketdata import MarketData, SymbolSnapshot
 from src.portfolio import Portfolio
@@ -317,6 +317,28 @@ class Scheduler:
                 if advice.action == "reduce":
                     qty = qty * 0.5
                     log.info("llm reduced size", extra={"symbol": sig.symbol, "reason": advice.reason})
+
+                # ── Fee-adjusted expectancy guard ──
+                # Skip trade if TP after fees doesn't provide positive expectancy
+                trade_type = getattr(sig, "trade_type", "scalp")
+                sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, snap.mid_price, trade_type)
+                round_trip_fee_bps = 2.0 * self.cfg.fee_rate_bps
+                net_tp_bps = tp_bps - round_trip_fee_bps
+                net_sl_bps = sl_bps + round_trip_fee_bps
+                # Need net_tp / net_sl > 1.0 for breakeven at 50% win rate
+                if net_tp_bps <= 0 or (net_sl_bps > 0 and net_tp_bps / net_sl_bps < 1.0):
+                    log.warning(
+                        "fee-adjusted expectancy guard: skipping low-expectancy trade",
+                        extra={
+                            "symbol": sig.symbol,
+                            "tp_bps": round(tp_bps, 1),
+                            "sl_bps": round(sl_bps, 1),
+                            "net_tp_bps": round(net_tp_bps, 1),
+                            "net_sl_bps": round(net_sl_bps, 1),
+                            "ratio": round(net_tp_bps / net_sl_bps, 2) if net_sl_bps > 0 else 0,
+                        },
+                    )
+                    continue
 
                 notional = qty * snap.mid_price
                 margin = notional / final_leverage
