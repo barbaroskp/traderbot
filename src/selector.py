@@ -29,6 +29,7 @@ class FilterStats:
     rejected_spread: int = 0
     rejected_depth: int = 0
     rejected_vol: int = 0
+    rejected_low_volume: int = 0
 
 
 class Selector:
@@ -156,8 +157,10 @@ class Selector:
         return tradeable, stats
 
     def _prefilter(self) -> list[str]:
-        """Stage 1: filter to active contracts with valid metadata, sorted by 24h volume."""
+        """Stage 1: filter to active contracts with valid metadata + min volume, sorted by 24h volume."""
         result: list[str] = []
+        min_vol = getattr(self.cfg, "min_volume_24h_usdt", 0.0)
+        skipped_low_vol = 0
         # Use volume-sorted order so shortlist picks most liquid symbols first
         for symbol in self.universe.symbols_by_volume:
             contract = self.universe.get_contract(symbol)
@@ -166,6 +169,15 @@ class Selector:
             # Must have tick_size and step_size
             if not contract.get("tick_size") or not contract.get("step_size"):
                 continue
-            # All contract types accepted (crypto, commodities, etc.)
+            # Minimum 24h volume filter – reject illiquid/meme coins
+            vol_24h = contract.get("volume_24h", 0.0)
+            if min_vol > 0 and vol_24h < min_vol:
+                skipped_low_vol += 1
+                continue
             result.append(symbol)
+        if skipped_low_vol > 0:
+            log.debug(
+                "prefilter: skipped low-volume symbols",
+                extra={"skipped": skipped_low_vol, "min_volume_24h": min_vol},
+            )
         return result
