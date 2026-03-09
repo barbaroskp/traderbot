@@ -59,8 +59,8 @@ class Settings(BaseSettings):
     fast_ema: int = 9
     slow_ema: int = 21
     entry_threshold_bps: float = 40.0      # conservative: higher bar = fewer but better entries
-    tp_bps: float = 150.0                  # wider TP: let winners run more (R:R improvement)
-    sl_bps: float = 80.0                   # wider SL: avoid noise stop-outs (was 50 – too tight)
+    tp_bps: float = 200.0                  # genis TP: kazananlari kostur (R:R = 2.86)
+    sl_bps: float = 70.0                   # daha siki SL: kayiplari kes
     max_hold_minutes: int = 180            # more time for trade to develop
     cooldown_minutes: int = 20             # longer cooldown: avoid revenge trading same coin
     max_open_positions: int = 3            # fewer positions: focus on quality (was 8)
@@ -109,8 +109,8 @@ class Settings(BaseSettings):
     min_weighted_score_no_ema: float = 55.0    # 0-100 normalized: need 55% agreement without EMA anchor
     risk_tight_min_weighted_score: float = 50.0   # TIGHT: only trade if 50%+ indicator agreement
     risk_ultra_min_weighted_score: float = 65.0   # ULTRA_TIGHT: need 65%+ indicator agreement
-    require_trend_not_against: bool = True   # True = trende ters girme, daha kaliteli islem
-    trade_with_trend_only: bool = True       # True = sadece trend yonunde islem ac
+    require_trend_not_against: bool = False  # False = trend filtresi SHORT'lari engellemsin
+    trade_with_trend_only: bool = False      # False = her yonde islem ac, indikatörlere güven
     rsi_full_vote_only: bool = True          # True = RSI sadece acik os/ob'da oy verir, daha temiz sinyal
     min_volume_ratio: float = 0.4  # skip when volume < 40% of recent avg (was 0 = off)
     use_regime_filter: bool = True
@@ -188,7 +188,7 @@ class Settings(BaseSettings):
     # ── Momentum Quality Filter ──────────────────────────────
     require_momentum_confirmation: bool = True
     momentum_bonus_weight: float = 15.0    # bigger momentum bonus (was 10)
-    no_momentum_discount: float = 0.5      # harsher penalty without momentum (was 0.7)
+    no_momentum_discount: float = 0.8      # hafif ceza: SHORT'lari cok penalize etmesin
 
     # ── Session/Funding Time Awareness ────────────────────────
     avoid_funding_window: bool = True
@@ -199,10 +199,10 @@ class Settings(BaseSettings):
     max_same_direction_positions: int = 2   # max 2 same-direction positions (was 5)
 
     # ── Smart Exit ────────────────────────────────────────────
-    use_momentum_exit: bool = True
-    use_time_decay_sl: bool = True
-    time_decay_start_pct: float = 0.6       # start tightening later (was 0.4 – too early)
-    time_decay_sl_reduction_pct: float = 0.3 # less aggressive tightening (was 0.5)
+    use_momentum_exit: bool = False          # KAPALI: kazananlari erken kesiyor
+    use_time_decay_sl: bool = False          # KAPALI: toparlanma sansi vermiyor
+    time_decay_start_pct: float = 0.6
+    time_decay_sl_reduction_pct: float = 0.3
 
     # ── Kelly Criterion Sizing (outputs MARGIN fraction) ──────
     use_kelly_sizing: bool = True
@@ -225,21 +225,21 @@ class Settings(BaseSettings):
 
     # ── Trade Management ───────────────────────────────────────
     use_dynamic_tp_sl: bool = True
-    atr_sl_multiplier: float = 1.5         # wider ATR-based SL (was 1.0 – too tight)
-    atr_tp_multiplier: float = 2.5         # wider ATR-based TP for better R:R (was 2.0)
+    atr_sl_multiplier: float = 1.2         # ATR-based SL: daha siki
+    atr_tp_multiplier: float = 3.0         # ATR-based TP: daha genis (R:R = 2.5x ATR)
     min_sl_bps: float = 50.0              # minimum SL floor raised (was 30 – noise territory)
     min_tp_bps: float = 100.0             # minimum TP floor raised (was 60)
     # TP must be at least this many bps above round-trip fees so that at TP we have net profit
     min_tp_net_bps: float = 25.0           # need 25bps net after fees (was 10)
-    use_trailing_stop: bool = True
-    trailing_activation_pct: float = 0.5   # activate later: let profit develop (was 0.4)
-    trailing_distance_pct: float = 0.5     # tighter trail once activated (was 0.6)
-    use_breakeven_stop: bool = True
-    breakeven_activation_pct: float = 0.4  # move to BE later (was 0.3 – too early, gets hit)
-    breakeven_buffer_bps: float = 5.0      # more buffer at breakeven (was 2.0 – too tight)
-    use_partial_tp: bool = True
-    partial_tp_fraction: float = 0.5
-    partial_tp_trigger_pct: float = 0.6    # partial TP later (was 0.5 – take more profit)
+    use_trailing_stop: bool = False          # KAPALI: kazananlari %40'ta kesiyor, TP'ye ulasamiyor
+    trailing_activation_pct: float = 0.75   # acilirsa bile %75 TP'de aktif olsun
+    trailing_distance_pct: float = 0.3
+    use_breakeven_stop: bool = False         # KAPALI: kucuk kari kilitleyip buyuk TP'yi engelliyor
+    breakeven_activation_pct: float = 0.7
+    breakeven_buffer_bps: float = 10.0
+    use_partial_tp: bool = False             # KAPALI: yari kari erken aliyor, kalan BE'de cikiyor
+    partial_tp_fraction: float = 0.3
+    partial_tp_trigger_pct: float = 0.8
 
     # ── Dynamic Leverage (conservative tiers) ─────────────────────
     dynamic_leverage_enabled: bool = True
