@@ -316,7 +316,7 @@ class Settings(BaseSettings):
 
     # ── Dashboard (systemd) ────────────────────────────────────
     # Service name for "systemctl is-active" (dashboard shows CALISIYOR/DURDU from this)
-    systemd_service_name: str = "mstis"
+    systemd_service_name: str = "bingx-agent"
 
     # ── Database ───────────────────────────────────────────────
     db_path: str = "data/bingx_agent.db"
