@@ -83,7 +83,7 @@ class Settings(BaseSettings):
     higher_tf_interval: str = "15m"
     higher_tf_limit: int = 50
     use_higher_tf_trend: bool = True
-    require_higher_tf_alignment: bool = True   # 15m trend MUST confirm 5m signal
+    require_higher_tf_alignment: bool = False   # 15m trend bonus olarak kalsin, hard-block yapmasin
     atr_period: int = 14
     adx_period: int = 14
     adx_trend_threshold: float = 25.0
@@ -136,7 +136,7 @@ class Settings(BaseSettings):
     weight_adx: float = 10.0
     stoch_rsi_oversold: float = 20.0
     stoch_rsi_overbought: float = 80.0
-    higher_tf_alignment_bonus: float = 12.0  # bigger bonus for 15m trend confirmation (was 8)
+    higher_tf_alignment_bonus: float = 15.0  # require_higher_tf off, bonus ile odullendir (was 12)
 
     # ── New Indicators (Tier 1+2) ─────────────────────────────
     # Taker Buy/Sell Ratio (proxy from candle direction)
@@ -186,13 +186,13 @@ class Settings(BaseSettings):
     sentiment_threshold: float = 20.0  # min absolute composite score to trigger vote
 
     # ── Momentum Quality Filter ──────────────────────────────
-    require_momentum_confirmation: bool = True
+    require_momentum_confirmation: bool = False  # momentum zaten indikator olarak oy veriyor, cift gate yapma
     momentum_bonus_weight: float = 15.0    # bigger momentum bonus (was 10)
     no_momentum_discount: float = 0.8      # hafif ceza: SHORT'lari cok penalize etmesin
 
     # ── Session/Funding Time Awareness ────────────────────────
     avoid_funding_window: bool = True
-    funding_window_minutes: int = 30  # wider window: avoid funding volatility
+    funding_window_minutes: int = 10  # 10 min yeterli, 30 min gunun %12.5'ini blokluyor
 
     # ── Correlation Filter ────────────────────────────────────
     use_correlation_filter: bool = True

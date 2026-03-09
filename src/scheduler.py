@@ -129,6 +129,11 @@ class Scheduler:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._shutdown)
 
+        # ── Cleanup orphaned PENDING orders from previous runs ───
+        # Orders stuck as PENDING with no matching OPEN position cause
+        # cancel_stale_orders to spam the exchange API every cycle.
+        self._cleanup_orphaned_orders()
+
         # ── Initial universe load ───────────────────────────────
         await self._safe_universe_refresh()
 
@@ -426,6 +431,51 @@ class Scheduler:
                 "rate_limit_hits": api_stats["rate_limit_hits"],
             },
         )
+
+    def _cleanup_orphaned_orders(self) -> None:
+        """Mark orphaned PENDING orders as CANCELLED on startup.
+
+        Orders left as PENDING from a previous crash/restart that have no
+        matching OPEN position cause cancel_stale_orders to spam the exchange
+        API every cycle trying to cancel already-gone orders.
+        """
+        try:
+            is_paper = 1 if self.cfg.paper_mode else 0
+            # Get all order IDs referenced by OPEN positions
+            open_positions = self.db.fetch_all(
+                "SELECT sl_order_id, tp_order_id, tp1_order_id FROM positions WHERE status='OPEN' AND is_paper=?",
+                (is_paper,),
+            )
+            protected_oids: set[str] = set()
+            for pos in open_positions:
+                for key in ("sl_order_id", "tp_order_id", "tp1_order_id"):
+                    oid = pos.get(key, "")
+                    if oid:
+                        protected_oids.add(oid)
+
+            # Find all PENDING orders
+            pending = self.db.fetch_all(
+                "SELECT id, client_order_id FROM orders WHERE status='PENDING' AND is_paper=?",
+                (is_paper,),
+            )
+
+            now = datetime.now(timezone.utc).isoformat()
+            orphaned = 0
+            for o in pending:
+                if o["client_order_id"] not in protected_oids:
+                    self.db.execute(
+                        "UPDATE orders SET status='CANCELLED', updated_at=? WHERE id=?",
+                        (now, o["id"]),
+                    )
+                    orphaned += 1
+
+            if orphaned:
+                log.info(
+                    "startup: cleaned orphaned PENDING orders",
+                    extra={"orphaned": orphaned, "protected": len(protected_oids)},
+                )
+        except Exception as exc:
+            log.warning("startup: orphaned order cleanup failed", extra={"error": str(exc)})
 
     async def _safe_universe_refresh(self) -> None:
         """Refresh universe, swallowing errors."""
