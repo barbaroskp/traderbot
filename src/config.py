@@ -259,7 +259,7 @@ class Settings(BaseSettings):
     max_leverage_for_price: bool = True  # auto-reduce leverage if liq price too close
 
     # ── Risk State Thresholds ────────────────────────────────────
-    risk_state_disabled: bool = False  # True = always stay in NORMAL, never escalate
+    risk_state_disabled: bool = True   # True = HER ZAMAN NORMAL, TIGHT/ULTRA yok
     risk_consec_losses_tight: int = 4          # escalate faster on losing streaks (was 8)
     risk_drawdown_pct_tight: float = 5.0       # tighter drawdown trigger (was 8%)
     risk_drawdown_min_for_consec_tight: float = 1.5
@@ -299,11 +299,11 @@ class Settings(BaseSettings):
 
     # ── Runtime Safety & Maintenance ───────────────────────────
     live_slippage_guard_bps: float = 20.0   # tighter slippage guard (was 35 – too loose)
-    soft_kill_switch_enabled: bool = True    # ENABLED: stop trading on extreme stress
+    soft_kill_switch_enabled: bool = False   # DISABLED: bot ASLA durmasin
     soft_kill_api_error_rate: float = 0.85
-    soft_kill_drawdown_pct: float = 25.0    # trigger earlier (was 35%)
-    soft_kill_min_balance_ratio: float = 0.25  # stop if balance drops to 25% of initial (was 15%)
-    soft_kill_cooldown_cycles: int = 5      # longer pause (was 2)
+    soft_kill_drawdown_pct: float = 99.0    # pratik olarak devre disi
+    soft_kill_min_balance_ratio: float = 0.01  # pratik olarak devre disi
+    soft_kill_cooldown_cycles: int = 0      # bekleme yok
     reconcile_interval_cycles: int = 5
     selector_lenient_enabled: bool = False  # DISABLED: don't loosen filters for garbage coins
     selector_lenient_spread_mult: float = 1.25
@@ -316,7 +316,7 @@ class Settings(BaseSettings):
 
     # ── Dashboard (systemd) ────────────────────────────────────
     # Service name for "systemctl is-active" (dashboard shows CALISIYOR/DURDU from this)
-    systemd_service_name: str = "bingx-agent"
+    systemd_service_name: str = "mstis"
 
     # ── Database ───────────────────────────────────────────────
     db_path: str = "data/bingx_agent.db"
