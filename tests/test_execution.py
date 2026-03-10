@@ -122,8 +122,8 @@ class TestPaperExecution:
         )
         await paper_exec.execute_signal(signal, snap, qty=0.001, current_total_margin=0)
 
-        # Set mark price above TP
-        mock_market.fetch_mark_price.return_value = 51000.0
+        # Set mark price above TP (TP=200bps=2% above entry ~50001, so need >51001)
+        mock_market.fetch_mark_price.return_value = 51500.0
 
         positions = db.get_open_positions()
         closed = await paper_exec.check_exits(positions)

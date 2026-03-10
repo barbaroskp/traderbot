@@ -20,9 +20,9 @@ def mock_universe() -> MagicMock:
     uni.symbols = ["BTC-USDT", "ETH-USDT", "DOGE-USDT"]
     uni.symbols_by_volume = ["BTC-USDT", "ETH-USDT", "DOGE-USDT"]
     uni.get_contract.side_effect = lambda s: {
-        "BTC-USDT": {"symbol": "BTC-USDT", "tick_size": 0.1, "step_size": 0.001, "quote_asset": "USDT"},
-        "ETH-USDT": {"symbol": "ETH-USDT", "tick_size": 0.01, "step_size": 0.01, "quote_asset": "USDT"},
-        "DOGE-USDT": {"symbol": "DOGE-USDT", "tick_size": 0.0001, "step_size": 1.0, "quote_asset": "USDT"},
+        "BTC-USDT": {"symbol": "BTC-USDT", "tick_size": 0.1, "step_size": 0.001, "quote_asset": "USDT", "volume_24h": 50_000_000},
+        "ETH-USDT": {"symbol": "ETH-USDT", "tick_size": 0.01, "step_size": 0.01, "quote_asset": "USDT", "volume_24h": 30_000_000},
+        "DOGE-USDT": {"symbol": "DOGE-USDT", "tick_size": 0.0001, "step_size": 1.0, "quote_asset": "USDT", "volume_24h": 10_000_000},
     }.get(s)
     return uni
 

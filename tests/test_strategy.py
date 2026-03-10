@@ -240,8 +240,9 @@ class TestMomentumConfirmation:
 
 
 class TestModeAwareEmaGate:
-    def test_mean_reversion_still_requires_ema(self, strategy_cfg, db) -> None:
-        """Default behavior: mean-reversion keeps EMA anchor."""
+    def test_mean_reversion_requires_ema_when_enabled(self, strategy_cfg, db) -> None:
+        """When require_ema_in_confluence=True, mean-reversion requires EMA anchor."""
+        strategy_cfg.require_ema_in_confluence = True  # explicitly enable
         strategy_cfg.require_momentum_confirmation = False
         strat = Strategy(strategy_cfg, db)
         snaps = [_make_snap(
@@ -261,6 +262,7 @@ class TestModeAwareEmaGate:
         """When configured, TREND_FOLLOW accepts non-EMA confluence if strong enough."""
         strategy_cfg.require_ema_in_confluence = True
         strategy_cfg.require_ema_in_trend_follow = False
+        strategy_cfg.use_regime_filter = True  # enable regime filter for TREND_FOLLOW mode
         strategy_cfg.min_confluence_no_ema = 3
         strategy_cfg.min_weighted_score_no_ema = 40
         strategy_cfg.require_momentum_confirmation = True
@@ -273,7 +275,7 @@ class TestModeAwareEmaGate:
             macd_hist_prev=0.001,
             bb_pct=0.1,
             trend="UP",
-            adx=35,  # TREND_FOLLOW mode
+            adx=35,  # TREND_FOLLOW mode (needs use_regime_filter=True)
             macd_strengthening=True,
         )]
         signals = strat.generate_signals(snaps, [])
@@ -284,6 +286,7 @@ class TestModeAwareEmaGate:
     def test_trend_follow_blocks_without_ema_when_override_true(self, strategy_cfg, db) -> None:
         strategy_cfg.require_ema_in_confluence = True
         strategy_cfg.require_ema_in_trend_follow = True
+        strategy_cfg.use_regime_filter = True
         strategy_cfg.require_momentum_confirmation = False
         strat = Strategy(strategy_cfg, db)
         snaps = [_make_snap(

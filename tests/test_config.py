@@ -13,7 +13,7 @@ class TestConfig:
         assert cfg.paper_mode is True
         assert cfg.allow_live_trading is False
         assert cfg.initial_capital_usdt == 20.0
-        assert cfg.leverage == 5  # aggressive default
+        assert cfg.leverage == 3
         assert cfg.margin_mode == MarginMode.ISOLATED
 
     def test_is_live_requires_both_flags(self) -> None:
@@ -47,39 +47,26 @@ class TestConfig:
         with pytest.raises(Exception):
             Settings(leverage=200)
 
-    def test_strategy_defaults(self) -> None:
+    def test_current_defaults(self) -> None:
+        """Test current optimized defaults."""
         cfg = Settings()
-        assert cfg.fast_ema == 9
-        assert cfg.slow_ema == 21
-        assert cfg.entry_threshold_bps == 25.0  # aggressive
-        assert cfg.tp_bps == 120.0              # aggressive
-        assert cfg.sl_bps == 50.0
-
-    def test_aggressive_params(self) -> None:
-        """Test aggressive profitability parameters."""
-        cfg = Settings()
-        # Aggressive capital/risk (margin-based)
-        assert cfg.max_total_margin_usdt == 15.0
-        assert cfg.max_trade_margin_usdt == 4.0
-        assert cfg.per_trade_fraction == 0.08
-        assert cfg.leverage == 5
-        assert cfg.leverage_high_conviction == 10
-        assert cfg.max_leverage_allowed == 15
-        assert cfg.max_open_positions == 8
-        assert cfg.cooldown_minutes == 6
-        # Aggressive sizing
-        assert cfg.target_risk_pct == 0.02
-        assert cfg.max_same_direction_positions == 5
-        # Dynamic leverage
-        assert cfg.dyn_leverage_tier1 == 7
-        assert cfg.dyn_leverage_tier2 == 10
-        assert cfg.dyn_leverage_tier3 == 15
-        # Adaptive scan
-        assert cfg.use_adaptive_scan is True
-        assert cfg.scan_interval_active_minutes == 1
-        # Mode-aware EMA gate
-        assert cfg.require_ema_in_mean_reversion is None
-        assert cfg.require_ema_in_trend_follow is None
-        assert cfg.require_ema_in_breakout is None
-        assert cfg.min_confluence_no_ema == 3
-        assert cfg.min_weighted_score_no_ema == 45.0  # normalized 0-100 scale
+        # Capital sizing (percentage-based)
+        assert cfg.max_total_margin_pct == 0.80
+        assert cfg.max_trade_margin_pct == 0.20
+        assert cfg.per_trade_fraction == 0.15
+        # Signal generation
+        assert cfg.entry_threshold_bps == 15.0
+        assert cfg.min_confluence_score == 3
+        assert cfg.min_confluence_no_ema == 4
+        assert cfg.min_weighted_score_no_ema == 35.0
+        assert cfg.require_ema_in_confluence is False
+        assert cfg.use_regime_filter is False
+        assert cfg.rsi_full_vote_only is False
+        # Selector
+        assert cfg.max_spread_bps == 30.0
+        assert cfg.min_depth_usdt == 1000.0
+        assert cfg.shortlist_size == 300
+        # Positions
+        assert cfg.max_open_positions == 5
+        assert cfg.cooldown_minutes == 10
+        assert cfg.scan_interval_minutes == 3

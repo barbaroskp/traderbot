@@ -303,7 +303,8 @@ class Scheduler:
                 if is_high_conviction:
                     qty = qty * self.cfg.high_conviction_margin_multiplier
                     # Cap by max margin for high conviction (margin cap, not notional)
-                    max_notional_high = self.cfg.max_margin_high_conviction_usdt * final_leverage
+                    hc_balance = self.portfolio.balance or self.cfg.initial_capital_usdt
+                    max_notional_high = hc_balance * self.cfg.max_margin_high_conviction_pct * final_leverage
                     max_qty_high = max_notional_high / snap.mid_price
                     qty = min(qty, max_qty_high)
                     log.info(

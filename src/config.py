@@ -40,9 +40,9 @@ class Settings(BaseSettings):
     # ── Capital (Margin-Based Futures Sizing) ─────────────────
     # Position sizing: margin = balance × fraction, notional = margin × leverage
     initial_capital_usdt: float = 20.0
-    max_total_margin_usdt: float = 8.0     # max total MARGIN: ~40% of capital (was 15 – 75%!)
-    max_trade_margin_usdt: float = 3.0     # max MARGIN per trade (was 4.0)
-    per_trade_fraction: float = 0.06       # 6% of balance as MARGIN per trade (was 8%)
+    max_total_margin_pct: float = 0.80      # toplam margin: bakiyenin %80'i (sabit 8$ degil!)
+    max_trade_margin_pct: float = 0.20      # tek islem margin: bakiyenin %20'si (sabit 3$ degil!)
+    per_trade_fraction: float = 0.15        # %15 bakiye margin olarak kullanilsin (6% cok dusuktu)
 
     # ── Risk ───────────────────────────────────────────────────
     leverage: int = 3                       # conservative: lower base leverage for tighter risk
@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     high_conviction_min_confluence: int = 5
     high_conviction_min_weighted_score: float = 60.0   # 0-100 normalized: daha ulasabilir esik
     high_conviction_margin_multiplier: float = 1.5     # 1.5x margin (was 2x – calmer sizing)
-    max_margin_high_conviction_usdt: float = 4.0       # max MARGIN for high conviction trades
+    max_margin_high_conviction_pct: float = 0.30        # high conviction: bakiyenin %30'u margin (sabit 4$ degil)
 
     # ── Strategy (EMA baseline) ──────────────────────────────
     fast_ema: int = 9
@@ -208,12 +208,12 @@ class Settings(BaseSettings):
     use_kelly_sizing: bool = True
     kelly_fraction: float = 0.3  # quarter-Kelly: more conservative (was 0.5 half-Kelly)
     kelly_min_trades: int = 30   # need more data for reliable stats (was 20)
-    kelly_min_fraction: float = 0.02  # minimum 2% of balance as margin
-    kelly_max_fraction: float = 0.08  # cap at 8% of balance as margin (was 12%)
+    kelly_min_fraction: float = 0.05  # minimum %5 (2% cok az: 6$ bakiye ile 0.12$ margin oluyordu)
+    kelly_max_fraction: float = 0.20  # cap %20 (8% cok dusuktu, bakiye buyuyunce de kucuk kaliyordu)
 
     # ── Volatility-Adjusted Sizing (outputs MARGIN amount) ───
     use_volatility_sizing: bool = True
-    target_risk_pct: float = 0.015          # 1.5% of balance risked per trade (was 2%)
+    target_risk_pct: float = 0.03            # %3 risk per trade (1.5% cok konservatif, buyuyemiyor)
     volatility_sizing_atr_mult: float = 1.5 # wider ATR buffer for sizing (was 1.2)
 
     # ── Selector ───────────────────────────────────────────────

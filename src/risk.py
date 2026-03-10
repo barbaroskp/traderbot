@@ -245,11 +245,12 @@ class RiskManager:
         return self._state
 
     def get_max_trade_margin(self) -> float:
-        """Max MARGIN per trade, adjusted by risk state.
+        """Max MARGIN per trade – percentage of current balance, scales with account size.
 
         Even in ULTRA_TIGHT, allows reasonable trade sizes.
         """
-        base = self.cfg.max_trade_margin_usdt
+        base = self._current_balance * self.cfg.max_trade_margin_pct
+        base = max(base, 1.0)  # minimum 1$ margin
         if self._state == RiskState.TIGHT:
             return base * 0.7   # 70% of max margin
         elif self._state == RiskState.ULTRA_TIGHT:
@@ -257,8 +258,9 @@ class RiskManager:
         return base
 
     def get_max_total_margin(self) -> float:
-        """Max total MARGIN across all positions."""
-        base = self.cfg.max_total_margin_usdt
+        """Max total MARGIN across all positions – percentage of current balance."""
+        base = self._current_balance * self.cfg.max_total_margin_pct
+        base = max(base, 2.0)  # minimum 2$ total
         if self._state == RiskState.TIGHT:
             return base * 0.7
         elif self._state == RiskState.ULTRA_TIGHT:
