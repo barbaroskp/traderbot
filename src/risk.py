@@ -353,7 +353,7 @@ class RiskManager:
         max_trade_margin = self.get_max_trade_margin()
         max_total_margin = self.get_max_total_margin()
         remaining_margin = max(0, max_total_margin - current_total_margin)
-        min_margin = 2.0  # minimum viable margin in USDT
+        min_margin = 1.0  # minimum viable margin: 1$ (2$ cok yuksekti dusuk bakiye icin)
 
         # Hard stop: never open new position if margin budget is exhausted
         if price <= 0 or remaining_margin < min_margin:

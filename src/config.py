@@ -50,26 +50,26 @@ class Settings(BaseSettings):
     max_leverage_allowed: int = 7           # hard cap: max 7x (was 15x – too aggressive)
     margin_mode: MarginMode = MarginMode.ISOLATED
     # High-conviction: all indicators agree → larger margin allocation + higher leverage
-    high_conviction_min_confluence: int = 6
-    high_conviction_min_weighted_score: float = 80.0   # 0-100 normalized: stricter threshold
+    high_conviction_min_confluence: int = 5
+    high_conviction_min_weighted_score: float = 60.0   # 0-100 normalized: daha ulasabilir esik
     high_conviction_margin_multiplier: float = 1.5     # 1.5x margin (was 2x – calmer sizing)
     max_margin_high_conviction_usdt: float = 4.0       # max MARGIN for high conviction trades
 
     # ── Strategy (EMA baseline) ──────────────────────────────
     fast_ema: int = 9
     slow_ema: int = 21
-    entry_threshold_bps: float = 40.0      # conservative: higher bar = fewer but better entries
+    entry_threshold_bps: float = 15.0      # dusuk esik: daha fazla coin sinyal uretsin (40 cok katiydi)
     tp_bps: float = 200.0                  # genis TP: kazananlari kostur (R:R = 2.86)
     sl_bps: float = 70.0                   # daha siki SL: kayiplari kes
     max_hold_minutes: int = 180            # more time for trade to develop
-    cooldown_minutes: int = 20             # longer cooldown: avoid revenge trading same coin
-    max_open_positions: int = 3            # fewer positions: focus on quality (was 8)
-    max_z_score_bps: float = 150.0         # narrower: reject extreme deviations (was 200)
+    cooldown_minutes: int = 10             # kisa cooldown: firsatlari kacirma (20 cok uzundu)
+    max_open_positions: int = 5            # daha fazla pozisyon: cesitlilik (3 cok azdi)
+    max_z_score_bps: float = 300.0         # genis: breakout firsatlarini da yakala (150 cok daraldi)
 
     # ── Multi-Indicator (RSI, MACD, Bollinger) ───────────────
     rsi_period: int = 14
-    rsi_oversold: float = 25.0          # stricter: only clear oversold counts
-    rsi_overbought: float = 75.0        # stricter: only clear overbought counts
+    rsi_oversold: float = 35.0          # genis zone: daha fazla sinyal (25 cok kati, RSI 30-35 de firsat)
+    rsi_overbought: float = 65.0        # genis zone: daha fazla sinyal (75 cok kati)
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
@@ -96,29 +96,29 @@ class Settings(BaseSettings):
     # ── Signal Confluence ────────────────────────────────────
     # Legacy switch kept for backward compatibility with existing .env files.
     # Mode-aware switches below override this when set.
-    require_ema_in_confluence: bool = True
+    require_ema_in_confluence: bool = False   # EMA zorunlu degil: diger indikatorler yeterli (True cok blokluyordu)
     # Mode-aware EMA gate:
     # - None => fallback to require_ema_in_confluence
     # - True/False => explicit behavior per mode
     require_ema_in_mean_reversion: bool | None = None
     require_ema_in_trend_follow: bool | None = None
     require_ema_in_breakout: bool | None = None
-    min_confluence_score: int = 4            # need 4+ indicators to agree (was 2 – way too loose)
+    min_confluence_score: int = 3            # 3 indikator yeterli (4 cok katiydi, sinyal uretmiyordu)
     # When EMA is not required, demand stronger agreement.
-    min_confluence_no_ema: int = 5           # need 5+ without EMA anchor (was 3)
-    min_weighted_score_no_ema: float = 55.0    # 0-100 normalized: need 55% agreement without EMA anchor
-    risk_tight_min_weighted_score: float = 50.0   # TIGHT: only trade if 50%+ indicator agreement
-    risk_ultra_min_weighted_score: float = 65.0   # ULTRA_TIGHT: need 65%+ indicator agreement
+    min_confluence_no_ema: int = 4           # EMA yoksa 4 indikator (5 cok yuksekti)
+    min_weighted_score_no_ema: float = 35.0    # 0-100 normalized: %35 yeterli (55 cok blokluyordu)
+    risk_tight_min_weighted_score: float = 30.0   # TIGHT: %30 yeterli (50 cok engelleyiciydi)
+    risk_ultra_min_weighted_score: float = 40.0   # ULTRA_TIGHT: %40 yeterli (65 asiri katiydi)
     require_trend_not_against: bool = False  # False = trend filtresi SHORT'lari engellemsin
     trade_with_trend_only: bool = False      # False = her yonde islem ac, indikatörlere güven
-    rsi_full_vote_only: bool = True          # True = RSI sadece acik os/ob'da oy verir, daha temiz sinyal
-    min_volume_ratio: float = 0.4  # skip when volume < 40% of recent avg (was 0 = off)
-    use_regime_filter: bool = True
+    rsi_full_vote_only: bool = False         # False = RSI gecis bolgelerinde de oy verir (True cok kati, sinyal olmuyor)
+    min_volume_ratio: float = 0.15  # dusuk volume da kabul et: gece/dusuk likidite donemlerinde islem acabilsin
+    use_regime_filter: bool = False  # KAPALI: TREND_FOLLOW/BREAKOUT_WATCH modlari sinyalleri cok engelliyor
     use_breakout_mode: bool = True
     use_orderbook_vote: bool = True
     orderbook_imbalance_long: float = 0.65
     orderbook_imbalance_short: float = 0.35
-    use_funding_filter: bool = True
+    use_funding_filter: bool = False  # KAPALI: funding rate filtresi cok sinyal engelliyor
     funding_rate_threshold: float = 0.0003    # more sensitive to funding extremes
     funding_contra_bonus: float = 8.0         # bigger bonus for contrarian funding trades
     # Weights for combined score (normalized to 0-100 at scoring time)
@@ -134,8 +134,8 @@ class Settings(BaseSettings):
     weight_momentum: float = 10.0
     weight_stoch_rsi: float = 15.0
     weight_adx: float = 10.0
-    stoch_rsi_oversold: float = 20.0
-    stoch_rsi_overbought: float = 80.0
+    stoch_rsi_oversold: float = 25.0   # biraz genis: daha fazla sinyal
+    stoch_rsi_overbought: float = 75.0  # biraz genis: daha fazla sinyal
     higher_tf_alignment_bonus: float = 15.0  # require_higher_tf off, bonus ile odullendir (was 12)
 
     # ── New Indicators (Tier 1+2) ─────────────────────────────
@@ -191,12 +191,12 @@ class Settings(BaseSettings):
     no_momentum_discount: float = 0.8      # hafif ceza: SHORT'lari cok penalize etmesin
 
     # ── Session/Funding Time Awareness ────────────────────────
-    avoid_funding_window: bool = True
-    funding_window_minutes: int = 10  # 10 min yeterli, 30 min gunun %12.5'ini blokluyor
+    avoid_funding_window: bool = False  # KAPALI: funding window filtresi gereksiz, sinyal kaybettiriyor
+    funding_window_minutes: int = 5   # kapali ama yine de dusuk tut
 
     # ── Correlation Filter ────────────────────────────────────
     use_correlation_filter: bool = True
-    max_same_direction_positions: int = 2   # max 2 same-direction positions (was 5)
+    max_same_direction_positions: int = 3   # max 3 ayni yon pozisyon (2 cok kisitlayiciydi)
 
     # ── Smart Exit ────────────────────────────────────────────
     use_momentum_exit: bool = False          # KAPALI: kazananlari erken kesiyor
@@ -217,11 +217,11 @@ class Settings(BaseSettings):
     volatility_sizing_atr_mult: float = 1.5 # wider ATR buffer for sizing (was 1.2)
 
     # ── Selector ───────────────────────────────────────────────
-    max_spread_bps: float = 15.0   # tight spread: only liquid coins (was 45 – too loose for memecoins)
-    min_depth_usdt: float = 5000.0 # serious liquidity required (was 500 – let HIPPO etc through)
-    vol_guard_bps: float = 500.0   # reject extreme volatility earlier (was 800)
-    shortlist_size: int = 150      # focus on top 150 liquid coins (was 700)
-    min_volume_24h_usdt: float = 5_000_000.0  # minimum $5M 24h volume – reject illiquid coins
+    max_spread_bps: float = 30.0   # genis spread: daha fazla coin (15 cok katiydi, cogu coin 15-30 arasi)
+    min_depth_usdt: float = 1000.0 # dusuk esik: kucuk pozisyonlar icin 1k$ yeterli (5k cok yuksekti)
+    vol_guard_bps: float = 600.0   # biraz genis: daha fazla firsat
+    shortlist_size: int = 300      # daha genis tarama: 300 coin (150 cok azdi)
+    min_volume_24h_usdt: float = 1_000_000.0  # 1M$ yeterli (5M cok yuksekti, firsatlari disladik)
 
     # ── Trade Management ───────────────────────────────────────
     use_dynamic_tp_sl: bool = True
@@ -243,14 +243,14 @@ class Settings(BaseSettings):
 
     # ── Dynamic Leverage (conservative tiers) ─────────────────────
     dynamic_leverage_enabled: bool = True
-    dyn_leverage_tier1_confluence: int = 4
-    dyn_leverage_tier1_weighted_score: float = 55.0   # need 55%+ score for any leverage boost
+    dyn_leverage_tier1_confluence: int = 3
+    dyn_leverage_tier1_weighted_score: float = 40.0   # %40 yeterli (55 hic ulasılamıyordu)
     dyn_leverage_tier1: int = 4                        # moderate: 4x (was 7x)
-    dyn_leverage_tier2_confluence: int = 5
-    dyn_leverage_tier2_weighted_score: float = 70.0    # need 70%+ for tier 2
+    dyn_leverage_tier2_confluence: int = 4
+    dyn_leverage_tier2_weighted_score: float = 55.0    # %55 tier 2
     dyn_leverage_tier2: int = 5                        # moderate: 5x (was 10x)
-    dyn_leverage_tier3_confluence: int = 7
-    dyn_leverage_tier3_weighted_score: float = 85.0    # need 85%+ for max leverage
+    dyn_leverage_tier3_confluence: int = 6
+    dyn_leverage_tier3_weighted_score: float = 70.0    # %70 tier 3 (85 asla ulasılamıyordu)
     dyn_leverage_tier3: int = 7                        # capped at 7x (was 15x!)
 
     # ── Anti-Liquidation ───────────────────────────────────────
@@ -284,15 +284,15 @@ class Settings(BaseSettings):
     swing_sl_bps: float = 150.0            # 1.5% stop loss
     swing_max_hold_minutes: int = 1440     # 24 hours
     swing_max_positions: int = 2           # separate cap from scalp (was 3)
-    swing_min_confluence: int = 4          # stricter swing confluence (was 3)
-    swing_require_trend_alignment: bool = True  # 4h trend must confirm
+    swing_min_confluence: int = 3          # 3 yeterli swing icin (4 cok katiydi)
+    swing_require_trend_alignment: bool = False  # trend zorunlu degil: daha fazla swing firsati
     swing_atr_sl_multiplier: float = 1.5
     swing_atr_tp_multiplier: float = 3.0
     swing_cooldown_minutes: int = 30       # longer cooldown for swing
     swing_leverage: int = 3                # lower leverage for swing (longer hold)
 
     # ── Scheduling ─────────────────────────────────────────────
-    scan_interval_minutes: int = 5         # slower scanning: less overtrading (was 3)
+    scan_interval_minutes: int = 3         # daha sik tarama: firsatlari yakala (5 dk fazla yavas)
     scan_interval_active_minutes: int = 2  # moderate active scan (was 1)
     use_adaptive_scan: bool = True
     universe_refresh_hours: int = 6
@@ -305,7 +305,7 @@ class Settings(BaseSettings):
     soft_kill_min_balance_ratio: float = 0.01  # pratik olarak devre disi
     soft_kill_cooldown_cycles: int = 0      # bekleme yok
     reconcile_interval_cycles: int = 5
-    selector_lenient_enabled: bool = False  # DISABLED: don't loosen filters for garbage coins
+    selector_lenient_enabled: bool = True   # AKTIF: filter cok kati olursa lenient fallback devreye girsin
     selector_lenient_spread_mult: float = 1.25
     selector_lenient_depth_mult: float = 0.75
     selector_lenient_min_tradeable: int = 8

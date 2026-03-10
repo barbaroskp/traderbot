@@ -330,8 +330,8 @@ class Scheduler:
                 round_trip_fee_bps = 2.0 * self.cfg.fee_rate_bps
                 net_tp_bps = tp_bps - round_trip_fee_bps
                 net_sl_bps = sl_bps + round_trip_fee_bps
-                # Need net_tp / net_sl > 1.5 for profitable trading (was 1.0 – just breakeven)
-                if net_tp_bps <= 0 or (net_sl_bps > 0 and net_tp_bps / net_sl_bps < 1.5):
+                # Need net_tp / net_sl > 1.0 for positive expectancy (1.5 cok katiydi, cok sinyal engelliyordu)
+                if net_tp_bps <= 0 or (net_sl_bps > 0 and net_tp_bps / net_sl_bps < 1.0):
                     log.warning(
                         "fee-adjusted expectancy guard: skipping low-expectancy trade",
                         extra={
