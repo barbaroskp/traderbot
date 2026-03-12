@@ -368,6 +368,11 @@ class Scheduler:
                         },
                     )
 
+                # Confidence tier sizing (high confidence → bigger, low → smaller)
+                conf_mult = getattr(sig, "confidence_mult", 1.0)
+                if conf_mult != 1.0:
+                    qty = qty * conf_mult
+
                 # Daily loss reduce: halve position sizes
                 daily_mult = self.risk.get_daily_size_multiplier()
                 if daily_mult < 1.0:

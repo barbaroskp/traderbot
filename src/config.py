@@ -59,11 +59,11 @@ class Settings(BaseSettings):
     fast_ema: int = 9
     slow_ema: int = 21
     entry_threshold_bps: float = 15.0      # dusuk esik: daha fazla coin sinyal uretsin (40 cok katiydi)
-    tp_bps: float = 200.0                  # genis TP: kazananlari kostur (R:R = 2.86)
-    sl_bps: float = 70.0                   # daha siki SL: kayiplari kes
+    tp_bps: float = 150.0                  # agresif: daha hizli kar al (200 cok uzak, cogu vurmuyordu)
+    sl_bps: float = 60.0                   # agresif: siki SL kayiplari hemen kes (R:R = 2.5)
     max_hold_minutes: int = 180            # more time for trade to develop
-    cooldown_minutes: int = 10             # kisa cooldown: firsatlari kacirma (20 cok uzundu)
-    max_open_positions: int = 5            # daha fazla pozisyon: cesitlilik (3 cok azdi)
+    cooldown_minutes: int = 7              # agresif: firsatlari kacirma (10 hala uzun)
+    max_open_positions: int = 7            # agresif: daha fazla cesitlilik ve firsat (5 az)
     max_z_score_bps: float = 300.0         # genis: breakout firsatlarini da yakala (150 cok daraldi)
 
     # ── Multi-Indicator (RSI, MACD, Bollinger) ───────────────
@@ -105,10 +105,10 @@ class Settings(BaseSettings):
     require_ema_in_breakout: bool | None = None
     min_confluence_score: int = 3            # 3 indikator yeterli (4 cok katiydi, sinyal uretmiyordu)
     # When EMA is not required, demand stronger agreement.
-    min_confluence_no_ema: int = 4           # EMA yoksa 4 indikator (5 cok yuksekti)
-    min_weighted_score_no_ema: float = 35.0    # 0-100 normalized: %35 yeterli (55 cok blokluyordu)
-    risk_tight_min_weighted_score: float = 30.0   # TIGHT: %30 yeterli (50 cok engelleyiciydi)
-    risk_ultra_min_weighted_score: float = 40.0   # ULTRA_TIGHT: %40 yeterli (65 asiri katiydi)
+    min_confluence_no_ema: int = 3           # agresif: 3 yeterli, confidence tier ile kontrol et (4 cok yuksekti)
+    min_weighted_score_no_ema: float = 30.0    # agresif: %30 (35 gereksiz engelliyor, tier ile kontrol)
+    risk_tight_min_weighted_score: float = 35.0   # TIGHT: biraz daha secici
+    risk_ultra_min_weighted_score: float = 45.0   # ULTRA_TIGHT: secici ama hala islem ac
     require_trend_not_against: bool = False  # False = trend filtresi SHORT'lari engellemsin
     trade_with_trend_only: bool = False      # False = her yonde islem ac, indikatörlere güven
     rsi_full_vote_only: bool = False         # False = RSI gecis bolgelerinde de oy verir (True cok kati, sinyal olmuyor)
@@ -291,6 +291,21 @@ class Settings(BaseSettings):
     decay_action: str = "reduce"                 # "reduce" veya "pause"
     decay_size_mult: float = 0.5                 # decay varken pozisyon buyuklugu carpani
 
+    # ── Expectancy-Based Signal Scoring ──────────────────────
+    use_expectancy_scoring: bool = True
+    expectancy_lookback: int = 200          # son 200 islem
+    expectancy_min_samples: int = 5         # pattern basina minimum ornek
+    expectancy_boost_pct: float = 15.0      # iyi pattern'a +15 skor
+    expectancy_penalty_pct: float = 10.0    # kotu pattern'a -10 skor
+
+    # ── Signal Confidence Tiers ────────────────────────────
+    use_confidence_tiers: bool = True
+    confidence_tier_high_score: float = 70.0    # 70+ = yuksek guven
+    confidence_tier_mid_score: float = 50.0     # 50-70 = orta guven
+    confidence_tier_high_mult: float = 1.5      # yuksek guven: %50 daha buyuk pozisyon
+    confidence_tier_mid_mult: float = 1.0       # orta guven: normal
+    confidence_tier_low_mult: float = 0.6       # dusuk guven: %40 kucuk pozisyon
+
     # ── Momentum Quality Filter ──────────────────────────────
     require_momentum_confirmation: bool = False  # momentum zaten indikator olarak oy veriyor, cift gate yapma
     momentum_bonus_weight: float = 15.0    # bigger momentum bonus (was 10)
@@ -302,7 +317,7 @@ class Settings(BaseSettings):
 
     # ── Correlation Filter ────────────────────────────────────
     use_correlation_filter: bool = True
-    max_same_direction_positions: int = 3   # max 3 ayni yon pozisyon (2 cok kisitlayiciydi)
+    max_same_direction_positions: int = 5   # agresif: 5 ayni yon (7 pozisyon, 5'e kadar ayni yon ok)
 
     # ── Smart Exit ────────────────────────────────────────────
     use_momentum_exit: bool = False          # KAPALI: kazananlari erken kesiyor

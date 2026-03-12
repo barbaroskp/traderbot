@@ -57,8 +57,8 @@ class TestConfig:
         # Signal generation
         assert cfg.entry_threshold_bps == 15.0
         assert cfg.min_confluence_score == 3
-        assert cfg.min_confluence_no_ema == 4
-        assert cfg.min_weighted_score_no_ema == 35.0
+        assert cfg.min_confluence_no_ema == 3
+        assert cfg.min_weighted_score_no_ema == 30.0
         assert cfg.require_ema_in_confluence is False
         assert cfg.use_regime_filter is False
         assert cfg.rsi_full_vote_only is False
@@ -67,6 +67,6 @@ class TestConfig:
         assert cfg.min_depth_usdt == 1000.0
         assert cfg.shortlist_size == 300
         # Positions
-        assert cfg.max_open_positions == 5
-        assert cfg.cooldown_minutes == 10
+        assert cfg.max_open_positions == 7
+        assert cfg.cooldown_minutes == 7
         assert cfg.scan_interval_minutes == 3

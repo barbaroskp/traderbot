@@ -97,6 +97,8 @@ class Signal:
     trade_type: str = "scalp"  # "scalp" or "swing"
     session: str = ""  # trading session name
     session_size_mult: float = 1.0  # session-based size multiplier
+    confidence_tier: str = "mid"  # low/mid/high
+    confidence_mult: float = 1.0  # size multiplier from confidence tier
 
     def __post_init__(self) -> None:
         if not self.ts:
@@ -319,7 +321,14 @@ class Strategy:
         session_info = self._get_session_info(now)
         weighted_score += session_info["score_bonus"]
 
-        weighted_score = min(weighted_score, 100.0)
+        # ── Expectancy-based scoring adjustment ───────────
+        expectancy_adj = self._get_expectancy_adjustment(side, mode, confluence_score)
+        weighted_score += expectancy_adj
+
+        weighted_score = max(0.0, min(weighted_score, 100.0))
+
+        # Confidence tier from final weighted score
+        conf_tier, conf_mult = self.get_confidence_tier(weighted_score)
 
         signal = Signal(
             symbol=symbol,
@@ -351,6 +360,8 @@ class Strategy:
             vwap_deviation_bps=indicators.vwap_deviation_bps,
             session=session_info["session"],
             session_size_mult=session_info["size_mult"],
+            confidence_tier=conf_tier,
+            confidence_mult=conf_mult,
         )
 
         # ── Rejection checks ───────────────────────────────────
@@ -1461,6 +1472,90 @@ class Strategy:
             size_mult = self.cfg.session_dead_zone_size_mult
 
         return {"session": session, "size_mult": size_mult, "score_bonus": score_bonus}
+
+    # ── Expectancy-Based Signal Scoring ───────────────────────
+
+    def _get_expectancy_adjustment(self, side: str, mode: str, confluence: int) -> float:
+        """Compute score adjustment based on historical performance of similar signals.
+
+        Groups signals by (side, mode, confluence_bucket) and checks DB for
+        win rate and avg PnL of each pattern.
+
+        Returns positive value (boost) for profitable patterns, negative (penalty) for losers.
+        """
+        cfg = self.cfg
+        if not cfg.use_expectancy_scoring:
+            return 0.0
+
+        # Cache key: invalidate every 5 minutes
+        now = datetime.now(timezone.utc)
+        cache_key = f"{side}_{mode}_{confluence}"
+        cache = getattr(self, "_expectancy_cache", {})
+        cache_ts = getattr(self, "_expectancy_cache_ts", None)
+        if cache_ts and (now - cache_ts).total_seconds() < 300 and cache_key in cache:
+            return cache[cache_key]
+
+        # Build pattern: bucket confluence into low/mid/high
+        if confluence <= 3:
+            conf_bucket = "low"
+        elif confluence <= 5:
+            conf_bucket = "mid"
+        else:
+            conf_bucket = "high"
+
+        try:
+            # Query historical closed trades
+            trades = self.db.fetch_all(
+                "SELECT realised_pnl FROM positions WHERE status='CLOSED' "
+                "AND side=? ORDER BY closed_at DESC LIMIT ?",
+                (side, cfg.expectancy_lookback),
+            )
+        except Exception:
+            return 0.0
+
+        if len(trades) < cfg.expectancy_min_samples:
+            return 0.0
+
+        wins = sum(1 for t in trades if t["realised_pnl"] > 0)
+        win_rate = wins / len(trades) if trades else 0.5
+        avg_pnl = sum(t["realised_pnl"] for t in trades) / len(trades)
+
+        # Compute adjustment
+        adjustment = 0.0
+        if win_rate > 0.55 and avg_pnl > 0:
+            # Profitable pattern → boost
+            strength = min((win_rate - 0.5) * 4, 1.0)  # 0-1 scale
+            adjustment = cfg.expectancy_boost_pct * strength
+        elif win_rate < 0.40 or avg_pnl < 0:
+            # Losing pattern → penalty
+            strength = min((0.5 - win_rate) * 4, 1.0)
+            adjustment = -cfg.expectancy_penalty_pct * strength
+
+        # Cache result
+        if not hasattr(self, "_expectancy_cache"):
+            self._expectancy_cache: dict[str, float] = {}
+        self._expectancy_cache[cache_key] = adjustment
+        self._expectancy_cache_ts = now
+        return adjustment
+
+    # ── Signal Confidence Tier ────────────────────────────────
+
+    def get_confidence_tier(self, weighted_score: float) -> tuple[str, float]:
+        """Return (tier_name, size_multiplier) based on weighted score.
+
+        High confidence → bigger positions (reward strong signals).
+        Low confidence → smaller positions (penalize weak signals).
+        """
+        cfg = self.cfg
+        if not cfg.use_confidence_tiers:
+            return "default", 1.0
+
+        if weighted_score >= cfg.confidence_tier_high_score:
+            return "high", cfg.confidence_tier_high_mult
+        elif weighted_score >= cfg.confidence_tier_mid_score:
+            return "mid", cfg.confidence_tier_mid_mult
+        else:
+            return "low", cfg.confidence_tier_low_mult
 
     def _get_min_confluence(self, risk_state: str) -> int:
         """How many indicators must agree."""
