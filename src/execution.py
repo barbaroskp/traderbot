@@ -570,7 +570,23 @@ class PaperExecution(ExecutionAdapter):
                     new_sl = mark * (1 + trail_bps / 10_000)
                 self._update_sl_order_price(pos, side, new_sl)
 
-            # ── NEW: Time-decay SL tightening ────────────────────
+            # ── Profit Lock: SL to breakeven when reaching X% of TP ──
+            if self.cfg.use_profit_lock and not pos.get("breakeven_triggered", 0):
+                if profit_bps >= tp_bps * self.cfg.profit_lock_activation_pct:
+                    buf = self.cfg.profit_lock_buffer_bps
+                    if side == "LONG":
+                        lock_price = entry * (1 + buf / 10_000)
+                    else:
+                        lock_price = entry * (1 - buf / 10_000)
+                    self._update_sl_order_price(pos, side, lock_price)
+                    self.db.execute(
+                        "UPDATE positions SET breakeven_triggered=1 WHERE id=?",
+                        (pos["id"],),
+                    )
+                    log.info("paper: profit lock activated", symbol=symbol,
+                             profit_bps=round(profit_bps, 1), lock_price=round(lock_price, 2))
+
+            # ── Time-decay SL tightening ─────────────────────────
             pos_max_hold = int(pos.get("max_hold_minutes") or 0) or (
                 self.cfg.swing_max_hold_minutes if pos.get("trade_type") == "swing"
                 else self.cfg.max_hold_minutes
@@ -582,30 +598,39 @@ class PaperExecution(ExecutionAdapter):
                 elapsed_min = (now - opened).total_seconds() / 60
                 decay_start = pos_max_hold * self.cfg.time_decay_start_pct
                 if elapsed_min > decay_start and profit_bps < 0:
-                    # Progressively tighten SL as position ages while in loss
                     decay_progress = min(1.0, (elapsed_min - decay_start) / (pos_max_hold - decay_start))
                     reduction = sl_bps * self.cfg.time_decay_sl_reduction_pct * decay_progress
-                    tightened_sl_bps = max(sl_bps * 0.3, sl_bps - reduction)  # never less than 30% of original
+                    tightened_sl_bps = max(sl_bps * 0.3, sl_bps - reduction)
                     if side == "LONG":
                         new_sl = entry * (1 - tightened_sl_bps / 10_000)
                     else:
                         new_sl = entry * (1 + tightened_sl_bps / 10_000)
                     self._update_sl_order_price(pos, side, new_sl)
 
-            # ── NEW: Momentum reversal exit ──────────────────────
+            # ── Momentum reversal exit (with safety guards) ──────
             if self.cfg.use_momentum_exit and not exit_reason and profit_bps < 0:
-                try:
-                    snap = await self.market.snapshot_symbol(symbol)
-                    if snap and snap.indicators.valid:
-                        hist = snap.indicators.macd_histogram
-                        prev = snap.indicators.macd_histogram_prev
-                        # MACD crossed zero against position direction while in loss
-                        if side == "LONG" and hist < 0 and prev >= 0:
-                            exit_reason = "MOMENTUM_EXIT"
-                        elif side == "SHORT" and hist > 0 and prev <= 0:
-                            exit_reason = "MOMENTUM_EXIT"
-                except Exception:
-                    pass  # don't block exit check on indicator fetch failure
+                # Guard 1: minimum loss threshold — don't exit on tiny dips
+                loss_deep_enough = abs(profit_bps) >= self.cfg.momentum_exit_min_loss_bps
+                # Guard 2: minimum hold time — avoid noise exits
+                opened_me = datetime.fromisoformat(pos["opened_at"])
+                if opened_me.tzinfo is None:
+                    opened_me = opened_me.replace(tzinfo=timezone.utc)
+                elapsed_me = (now - opened_me).total_seconds() / 60
+                min_hold = pos_max_hold * self.cfg.momentum_exit_min_hold_pct
+                held_long_enough = elapsed_me >= min_hold
+
+                if loss_deep_enough and held_long_enough:
+                    try:
+                        snap = await self.market.snapshot_symbol(symbol)
+                        if snap and snap.indicators.valid:
+                            hist = snap.indicators.macd_histogram
+                            prev = snap.indicators.macd_histogram_prev
+                            if side == "LONG" and hist < 0 and prev >= 0:
+                                exit_reason = "MOMENTUM_EXIT"
+                            elif side == "SHORT" and hist > 0 and prev <= 0:
+                                exit_reason = "MOMENTUM_EXIT"
+                    except Exception:
+                        pass
 
             # ── SL check ────────────────────────────────────────
             sl_order = self.db.fetch_one(
@@ -1535,6 +1560,22 @@ class LiveExecution(ExecutionAdapter):
                     new_sl = mark * (1 + trail_bps / 10_000)
                 await self._update_live_sl(pos, side, exch_qty, new_sl)
 
+            # ── Profit Lock: SL to breakeven when reaching X% of TP ──
+            if self.cfg.use_profit_lock and not pos.get("breakeven_triggered", 0):
+                if profit_bps >= tp_bps * self.cfg.profit_lock_activation_pct:
+                    buf = self.cfg.profit_lock_buffer_bps
+                    if side == "LONG":
+                        lock_price = entry * (1 + buf / 10_000)
+                    else:
+                        lock_price = entry * (1 - buf / 10_000)
+                    await self._update_live_sl(pos, side, exch_qty, lock_price)
+                    self.db.execute(
+                        "UPDATE positions SET breakeven_triggered=1 WHERE id=?",
+                        (pos["id"],),
+                    )
+                    log.info("live: profit lock activated", symbol=symbol,
+                             profit_bps=round(profit_bps, 1), lock_price=round(lock_price, 2))
+
             # Time-decay SL tightening (live)
             live_max_hold = int(pos.get("max_hold_minutes") or 0) or (
                 self.cfg.swing_max_hold_minutes if pos.get("trade_type") == "swing"
@@ -1556,20 +1597,29 @@ class LiveExecution(ExecutionAdapter):
                         new_sl = entry * (1 + tightened_sl_bps / 10_000)
                     await self._update_live_sl(pos, side, exch_qty, new_sl)
 
-            # Momentum reversal exit (live)
+            # Momentum reversal exit (live, with safety guards)
             should_momentum_exit = False
             if self.cfg.use_momentum_exit and profit_bps < 0:
-                try:
-                    snap = await self.market.snapshot_symbol(symbol)
-                    if snap and snap.indicators.valid:
-                        hist = snap.indicators.macd_histogram
-                        prev = snap.indicators.macd_histogram_prev
-                        if side == "LONG" and hist < 0 and prev >= 0:
-                            should_momentum_exit = True
-                        elif side == "SHORT" and hist > 0 and prev <= 0:
-                            should_momentum_exit = True
-                except Exception:
-                    pass
+                loss_deep_enough = abs(profit_bps) >= self.cfg.momentum_exit_min_loss_bps
+                opened_me = datetime.fromisoformat(pos["opened_at"])
+                if opened_me.tzinfo is None:
+                    opened_me = opened_me.replace(tzinfo=timezone.utc)
+                elapsed_me = (now - opened_me).total_seconds() / 60
+                min_hold = live_max_hold * self.cfg.momentum_exit_min_hold_pct
+                held_long_enough = elapsed_me >= min_hold
+
+                if loss_deep_enough and held_long_enough:
+                    try:
+                        snap = await self.market.snapshot_symbol(symbol)
+                        if snap and snap.indicators.valid:
+                            hist = snap.indicators.macd_histogram
+                            prev = snap.indicators.macd_histogram_prev
+                            if side == "LONG" and hist < 0 and prev >= 0:
+                                should_momentum_exit = True
+                            elif side == "SHORT" and hist > 0 and prev <= 0:
+                                should_momentum_exit = True
+                    except Exception:
+                        pass
 
             if should_momentum_exit:
                 try:

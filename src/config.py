@@ -320,10 +320,16 @@ class Settings(BaseSettings):
     max_same_direction_positions: int = 5   # agresif: 5 ayni yon (7 pozisyon, 5'e kadar ayni yon ok)
 
     # ── Smart Exit ────────────────────────────────────────────
-    use_momentum_exit: bool = False          # KAPALI: kazananlari erken kesiyor
-    use_time_decay_sl: bool = False          # KAPALI: toparlanma sansi vermiyor
-    time_decay_start_pct: float = 0.6
-    time_decay_sl_reduction_pct: float = 0.3
+    use_momentum_exit: bool = True           # AKTIF: sadece zarardaki pozisyonlarda MACD cross tetikler
+    momentum_exit_min_hold_pct: float = 0.25  # pozisyon max_hold'un %25'ini doldurmadan exit yapma (gurultu filtresi)
+    momentum_exit_min_loss_bps: float = 15.0  # en az 15bps zararda olmalikayip yoksa momentum exit yapma
+    use_time_decay_sl: bool = True           # AKTIF: zarardaki eski pozisyonlarda SL'yi sik (kaybi sinirla)
+    time_decay_start_pct: float = 0.65       # max_hold'un %65'inden sonra baslat (toparlanma sansi ver)
+    time_decay_sl_reduction_pct: float = 0.25  # SL'yi en fazla %25 daraltan daha konservatif)
+    # ── Profit Lock ──────────────────────────────────────────
+    use_profit_lock: bool = True             # AKTIF: kar koruma — TP'nin %60'ina ulasinca SL'yi entry'ye cek
+    profit_lock_activation_pct: float = 0.60  # TP'nin %60'i karlaninca aktif
+    profit_lock_buffer_bps: float = 5.0       # entry + 5bps (komisyon ustu kucuk kar garanti)
 
     # ── Tiered TP (Kademeli Kar Al) ─────────────────────────
     # 3 kademeli cikis: hizli kar al + kazanani kostur + trailing

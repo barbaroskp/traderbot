@@ -188,6 +188,165 @@ class TestPaperExecution:
         assert closed[0]["realised_pnl"] > 0
 
 
+class TestProfitLock:
+    @pytest.mark.asyncio
+    async def test_profit_lock_moves_sl_to_breakeven(self, cfg, db, mock_market, mock_universe) -> None:
+        """When price reaches 60% of TP, SL should move to entry + buffer."""
+        cfg.use_profit_lock = True
+        cfg.profit_lock_activation_pct = 0.60
+        cfg.profit_lock_buffer_bps = 5.0
+        cfg.use_tiered_tp = False
+        cfg.use_breakeven_stop = False
+        cfg.use_trailing_stop = False
+        cfg.use_time_decay_sl = False
+        cfg.use_momentum_exit = False
+        risk = RiskManager(cfg, db)
+        paper = PaperExecution(cfg, db, mock_market, risk, mock_universe)
+
+        signal = Signal(
+            symbol="BTC-USDT", side="LONG", z_score_bps=-30,
+            mid_price=50000, fast_ema=50000, slow_ema=49900,
+            spread_bps=2, depth_usdt=5000,
+        )
+        snap = SymbolSnapshot(
+            symbol="BTC-USDT", mid_price=50000, best_bid=49999, best_ask=50001,
+        )
+        await paper.execute_signal(signal, snap, qty=0.001, current_total_margin=0)
+
+        # Set mark price to 60% of TP (tp=150bps → 60% = 90bps above entry)
+        pos = db.get_open_positions()[0]
+        entry = pos["entry_price"]
+        tp_bps = float(pos.get("tp_bps") or cfg.tp_bps)
+        target_price = entry * (1 + tp_bps * 0.65 / 10_000)  # slightly above 60%
+        mock_market.fetch_mark_price.return_value = target_price
+
+        positions = db.get_open_positions()
+        await paper.check_exits(positions)
+
+        # SL should have moved to breakeven (entry + buffer)
+        pos_after = db.get_open_positions()[0]
+        assert pos_after.get("breakeven_triggered") == 1
+
+    @pytest.mark.asyncio
+    async def test_profit_lock_disabled(self, cfg, db, mock_market, mock_universe) -> None:
+        """When disabled, SL should not move on partial profit."""
+        cfg.use_profit_lock = False
+        cfg.use_tiered_tp = False
+        cfg.use_breakeven_stop = False
+        cfg.use_trailing_stop = False
+        cfg.use_time_decay_sl = False
+        cfg.use_momentum_exit = False
+        risk = RiskManager(cfg, db)
+        paper = PaperExecution(cfg, db, mock_market, risk, mock_universe)
+
+        signal = Signal(
+            symbol="BTC-USDT", side="LONG", z_score_bps=-30,
+            mid_price=50000, fast_ema=50000, slow_ema=49900,
+            spread_bps=2, depth_usdt=5000,
+        )
+        snap = SymbolSnapshot(
+            symbol="BTC-USDT", mid_price=50000, best_bid=49999, best_ask=50001,
+        )
+        await paper.execute_signal(signal, snap, qty=0.001, current_total_margin=0)
+
+        pos = db.get_open_positions()[0]
+        entry = pos["entry_price"]
+        tp_bps = float(pos.get("tp_bps") or cfg.tp_bps)
+        target_price = entry * (1 + tp_bps * 0.65 / 10_000)
+        mock_market.fetch_mark_price.return_value = target_price
+
+        positions = db.get_open_positions()
+        await paper.check_exits(positions)
+
+        pos_after = db.get_open_positions()[0]
+        assert not pos_after.get("breakeven_triggered")
+
+
+class TestMomentumExitGuards:
+    @pytest.mark.asyncio
+    async def test_momentum_exit_respects_min_hold(self, cfg, db, mock_market, mock_universe) -> None:
+        """Momentum exit should not trigger before minimum hold time."""
+        cfg.use_momentum_exit = True
+        cfg.momentum_exit_min_hold_pct = 0.25
+        cfg.momentum_exit_min_loss_bps = 10.0
+        cfg.use_tiered_tp = False
+        cfg.use_breakeven_stop = False
+        cfg.use_trailing_stop = False
+        cfg.use_time_decay_sl = False
+        cfg.use_profit_lock = False
+        risk = RiskManager(cfg, db)
+        paper = PaperExecution(cfg, db, mock_market, risk, mock_universe)
+
+        signal = Signal(
+            symbol="BTC-USDT", side="LONG", z_score_bps=-30,
+            mid_price=50000, fast_ema=50000, slow_ema=49900,
+            spread_bps=2, depth_usdt=5000,
+        )
+        snap = SymbolSnapshot(
+            symbol="BTC-USDT", mid_price=50000, best_bid=49999, best_ask=50001,
+        )
+        await paper.execute_signal(signal, snap, qty=0.001, current_total_margin=0)
+
+        # Price drops but position just opened (min hold not met)
+        mock_market.fetch_mark_price.return_value = 49900.0  # ~20bps loss
+        from src.marketdata import Indicators
+        mock_snap = MagicMock(spec=SymbolSnapshot)
+        mock_snap.indicators = MagicMock()
+        mock_snap.indicators.valid = True
+        mock_snap.indicators.macd_histogram = -0.001  # bearish cross
+        mock_snap.indicators.macd_histogram_prev = 0.001
+        mock_market.snapshot_symbol.return_value = mock_snap
+
+        positions = db.get_open_positions()
+        closed = await paper.check_exits(positions)
+
+        # Should NOT have momentum exited (position too fresh)
+        momentum_exits = [c for c in closed if c.get("exit_reason") == "MOMENTUM_EXIT"]
+        assert len(momentum_exits) == 0
+
+    @pytest.mark.asyncio
+    async def test_momentum_exit_respects_min_loss(self, cfg, db, mock_market, mock_universe) -> None:
+        """Momentum exit should not trigger on tiny losses."""
+        cfg.use_momentum_exit = True
+        cfg.momentum_exit_min_hold_pct = 0.0  # no hold requirement
+        cfg.momentum_exit_min_loss_bps = 30.0  # need 30bps loss
+        cfg.use_tiered_tp = False
+        cfg.use_breakeven_stop = False
+        cfg.use_trailing_stop = False
+        cfg.use_time_decay_sl = False
+        cfg.use_profit_lock = False
+        risk = RiskManager(cfg, db)
+        paper = PaperExecution(cfg, db, mock_market, risk, mock_universe)
+
+        signal = Signal(
+            symbol="BTC-USDT", side="LONG", z_score_bps=-30,
+            mid_price=50000, fast_ema=50000, slow_ema=49900,
+            spread_bps=2, depth_usdt=5000,
+        )
+        snap = SymbolSnapshot(
+            symbol="BTC-USDT", mid_price=50000, best_bid=49999, best_ask=50001,
+        )
+        await paper.execute_signal(signal, snap, qty=0.001, current_total_margin=0)
+
+        # Only 5bps loss — below 30bps threshold
+        pos = db.get_open_positions()[0]
+        entry = pos["entry_price"]
+        mock_market.fetch_mark_price.return_value = entry * (1 - 5.0 / 10_000)
+
+        mock_snap = MagicMock(spec=SymbolSnapshot)
+        mock_snap.indicators = MagicMock()
+        mock_snap.indicators.valid = True
+        mock_snap.indicators.macd_histogram = -0.001
+        mock_snap.indicators.macd_histogram_prev = 0.001
+        mock_market.snapshot_symbol.return_value = mock_snap
+
+        positions = db.get_open_positions()
+        closed = await paper.check_exits(positions)
+
+        momentum_exits = [c for c in closed if c.get("exit_reason") == "MOMENTUM_EXIT"]
+        assert len(momentum_exits) == 0
+
+
 class TestRoundQty:
     def test_round_to_step(self) -> None:
         assert PaperExecution._round_qty(0.0035, 0.001) == pytest.approx(0.003)
