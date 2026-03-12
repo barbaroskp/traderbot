@@ -224,6 +224,27 @@ class Scheduler:
 
         soft_kill_active = self._update_soft_kill(api_stats)
 
+        # ── Daily loss circuit breaker ────────────────────────────
+        if self.risk.daily_kill_active:
+            # Kill switch: close ALL open positions immediately
+            remaining_open = self.portfolio.get_open_positions(is_paper)
+            if remaining_open:
+                log.warning(
+                    "DAILY LOSS KILL: closing all positions",
+                    extra={"positions": len(remaining_open), "daily_pnl": round(self.risk.daily_pnl, 4)},
+                )
+                kill_closed = await self.execution.check_exits(
+                    [{**p, "force_close": True} for p in remaining_open]
+                )
+                # Force close by setting timeout to 0 won't work, use _close_position directly
+                for pos in remaining_open:
+                    if pos["status"] == "OPEN":
+                        mark = await self.market.fetch_mark_price(pos["symbol"])
+                        if mark > 0:
+                            c = await self.execution._close_position(pos, mark, "DAILY_KILL")
+                            self.portfolio.apply_closed_trades([c])
+                            self.risk.record_trade_result(c.get("realised_pnl", 0))
+
         # ── 5b. LLM advisor (optional) ───────────────────────────
         self.llm_advisor.reset_cycle()
         summary = self.portfolio.get_summary()
@@ -244,12 +265,22 @@ class Scheduler:
         current_margin = self.portfolio.get_total_margin(is_paper)
         executed = 0
 
+        daily_blocked = not self.risk.can_open_new_trade()
         if soft_kill_active:
             log.warning(
                 "soft kill-switch active: new entries paused",
                 extra={
                     "cycles_left": self._soft_kill_cycles_left,
                     "risk_state": risk_state.value,
+                },
+            )
+        elif daily_blocked:
+            log.warning(
+                "daily loss circuit breaker: new entries paused",
+                extra={
+                    "daily_pnl": round(self.risk.daily_pnl, 4),
+                    "kill_active": self.risk.daily_kill_active,
+                    "stop_active": self.risk.daily_stop_active,
                 },
             )
         else:
@@ -319,6 +350,11 @@ class Scheduler:
                             "notional": round(qty * snap.mid_price, 2),
                         },
                     )
+
+                # Daily loss reduce: halve position sizes
+                daily_mult = self.risk.get_daily_size_multiplier()
+                if daily_mult < 1.0:
+                    qty = qty * daily_mult
 
                 if advice.action == "reduce":
                     qty = qty * 0.5

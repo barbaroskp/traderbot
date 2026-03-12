@@ -503,9 +503,9 @@ class PaperExecution(ExecutionAdapter):
 
             exit_reason = ""
 
-            # ── Partial TP check ─────────────────────────────────
+            # ── Partial TP1 check (tiered or legacy partial TP) ───
             if (
-                self.cfg.use_partial_tp
+                (self.cfg.use_partial_tp or self.cfg.use_tiered_tp)
                 and not pos.get("partial_tp_filled", 0)
                 and pos.get("tp1_order_id")
             ):
@@ -525,8 +525,8 @@ class PaperExecution(ExecutionAdapter):
                         pos["remaining_qty"] = remaining
                         pos["qty"] = remaining
 
-                        # Move SL to breakeven after partial TP
-                        if self.cfg.use_breakeven_stop:
+                        # Move SL to breakeven after TP1 (always for tiered, optional for legacy)
+                        if self.cfg.use_breakeven_stop or (self.cfg.use_tiered_tp and self.cfg.tiered_move_sl_after_tp1):
                             if side == "LONG":
                                 be_price = entry * (1 + self.cfg.breakeven_buffer_bps / 10_000)
                             else:
@@ -1083,32 +1083,53 @@ class LiveExecution(ExecutionAdapter):
         close_side = "SELL" if signal.side == "LONG" else "BUY"
 
         sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, avg_price, getattr(signal, "trade_type", "scalp"))
+
+        # SL Randomization (stop hunting koruması)
+        if self.cfg.use_sl_randomization:
+            sl_offset = random.uniform(self.cfg.sl_random_min_bps, self.cfg.sl_random_max_bps)
+            sl_bps += sl_offset
+
         if signal.side == "LONG":
             sl_price = avg_price * (1 - sl_bps / 10_000)
-            tp_price = avg_price * (1 + tp_bps / 10_000)
         else:
             sl_price = avg_price * (1 + sl_bps / 10_000)
-            tp_price = avg_price * (1 - tp_bps / 10_000)
 
+        # Tiered TP computation
         sl_oid = generate_client_order_id()
-        tp_oid = generate_client_order_id()
         tp1_oid = ""
         tp1_price = 0.0
         tp1_qty = 0.0
+        tp2_oid = generate_client_order_id()
+        tp2_price = 0.0
         tp2_qty = filled_qty
-        if self.cfg.use_partial_tp and 0 < self.cfg.partial_tp_fraction < 1:
-            tp1_qty = filled_qty * self.cfg.partial_tp_fraction
-            tp2_qty = filled_qty - tp1_qty
-            tp1_bps = tp_bps * self.cfg.partial_tp_trigger_pct
+        tp3_qty = 0.0
+
+        if self.cfg.use_tiered_tp:
+            # TP1: %40 qty at %50 of TP target
+            tp1_bps = tp_bps * self.cfg.tiered_tp1_ratio
+            tp1_qty = filled_qty * self.cfg.tiered_tp1_fraction
             if signal.side == "LONG":
                 tp1_price = avg_price * (1 + tp1_bps / 10_000)
             else:
                 tp1_price = avg_price * (1 - tp1_bps / 10_000)
-            if tp1_qty > 0 and tp2_qty > 0:
-                tp1_oid = generate_client_order_id()
+            tp1_oid = generate_client_order_id()
+
+            # TP2: %30 qty at %100 of TP target
+            tp2_bps = tp_bps * self.cfg.tiered_tp2_ratio
+            tp2_qty = filled_qty * self.cfg.tiered_tp2_fraction
+            if signal.side == "LONG":
+                tp2_price = avg_price * (1 + tp2_bps / 10_000)
             else:
-                tp1_qty = 0.0
-                tp2_qty = filled_qty
+                tp2_price = avg_price * (1 - tp2_bps / 10_000)
+
+            # TP3: remaining for trailing
+            tp3_qty = filled_qty - tp1_qty - tp2_qty
+        else:
+            # Single TP
+            if signal.side == "LONG":
+                tp2_price = avg_price * (1 + tp_bps / 10_000)
+            else:
+                tp2_price = avg_price * (1 - tp_bps / 10_000)
 
         # SL (stop-market) – with verification loop + fallback market close
         close_position_side = signal.side  # same position side for closing
@@ -1184,7 +1205,7 @@ class LiveExecution(ExecutionAdapter):
             except BingXClientError as exc:
                 log.error("live: TP1 placement failed", extra={"error": str(exc)})
 
-        # TP2 (final) – take-profit market
+        # TP2 – take-profit market
         try:
             await self.client.place_order(
                 symbol=signal.symbol,
@@ -1192,11 +1213,11 @@ class LiveExecution(ExecutionAdapter):
                 position_side=close_position_side,
                 order_type="TAKE_PROFIT_MARKET",
                 quantity=tp2_qty,
-                stop_price=tp_price,
-                client_order_id=tp_oid,
+                stop_price=tp2_price,
+                client_order_id=tp2_oid,
             )
         except BingXClientError as exc:
-            log.error("live: TP placement failed", extra={"error": str(exc)})
+            log.error("live: TP2 placement failed", extra={"error": str(exc)})
 
         # ── Persist SL/TP orders ───────────────────────────────
         self.db.insert(
@@ -1247,13 +1268,13 @@ class LiveExecution(ExecutionAdapter):
         self.db.insert(
             "orders",
             {
-                "client_order_id": tp_oid,
+                "client_order_id": tp2_oid,
                 "exchange_order_id": "",
                 "ts": now,
                 "symbol": signal.symbol,
                 "side": "SHORT" if signal.side == "LONG" else "LONG",
                 "order_type": "TAKE_PROFIT_MARKET",
-                "price": tp_price,
+                "price": tp2_price,
                 "qty": tp2_qty,
                 "status": "PENDING",
                 "filled_qty": 0,
@@ -1277,7 +1298,8 @@ class LiveExecution(ExecutionAdapter):
                 "notional": notional,
                 "sl_order_id": sl_oid,
                 "tp1_order_id": tp1_oid,
-                "tp_order_id": tp_oid,
+                "tp_order_id": tp2_oid,
+                "tp3_qty": tp3_qty,
                 "sl_bps": sl_bps,
                 "tp_bps": tp_bps,
                 "original_qty": filled_qty,
@@ -1285,6 +1307,7 @@ class LiveExecution(ExecutionAdapter):
                 "leverage": leverage,
                 "breakeven_triggered": 0,
                 "partial_tp_filled": 0,
+                "tp2_filled": 0,
                 "highest_price": avg_price,
                 "lowest_price": avg_price,
                 "opened_at": now,
