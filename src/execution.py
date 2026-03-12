@@ -53,6 +53,17 @@ def _compute_tp_sl_bps(
         sl_bps = base_sl
         tp_bps = base_tp
 
+    # ── Volatility Regime Adaptation ──────────────────────────
+    # Adjust SL/TP based on current volatility regime
+    if cfg.use_vol_regime_sl_tp and snap.indicators.atr > 0 and entry_price > 0:
+        atr_bps_now = (snap.indicators.atr / entry_price) * 10_000
+        if atr_bps_now < cfg.vol_low_atr_bps:
+            sl_bps *= cfg.vol_low_sl_mult
+            tp_bps *= cfg.vol_low_tp_mult
+        elif atr_bps_now > cfg.vol_high_atr_bps:
+            sl_bps *= cfg.vol_high_sl_mult
+            tp_bps *= cfg.vol_high_tp_mult
+
     # Floor TP so that after round-trip fees we have at least min_tp_net_bps net profit
     round_trip_fee_bps = 2.0 * cfg.fee_rate_bps
     tp_floor = round_trip_fee_bps + getattr(cfg, "min_tp_net_bps", 10.0)

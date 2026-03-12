@@ -124,7 +124,7 @@ class Settings(BaseSettings):
     # ── Indicator Simplification ─────────────────────────────
     # 22 indikator var ama ~7 bagimsiz bilgi kaynagi. Sadece bagimsiz olanlari kullan.
     # Aktif olmayanlar hesaplanir ama oy sayisina/agirliga katilmaz.
-    active_indicators: str = "ema_zscore,rsi,macd,bollinger,adx,orderbook,obv,vwap"
+    active_indicators: str = "ema_zscore,rsi,macd,bollinger,adx,orderbook,obv,vwap,funding_rate,multi_tf,vol_regime"
 
     # Weights for combined score (normalized to 0-100 at scoring time)
     weight_ema: float = 25.0
@@ -189,6 +189,25 @@ class Settings(BaseSettings):
     use_sentiment: bool = True
     weight_sentiment: float = 10.0
     sentiment_threshold: float = 20.0  # min absolute composite score to trigger vote
+
+    # ── Alpha Signals (Faz 2) ────────────────────────────────
+    # Funding Rate Mean Reversion: extreme funding → contrarian trade
+    weight_funding_rate: float = 15.0
+
+    # Multi-TF Momentum Alignment: higher TF trend as proper vote
+    weight_multi_tf: float = 15.0
+
+    # Volatility Regime: squeeze breakout detection
+    weight_vol_regime: float = 12.0
+
+    # Volatility Regime SL/TP adaptation
+    use_vol_regime_sl_tp: bool = True
+    vol_low_atr_bps: float = 30.0       # ATR < 30bps = low vol
+    vol_high_atr_bps: float = 120.0     # ATR > 120bps = high vol
+    vol_low_sl_mult: float = 0.7        # low vol → tighter SL
+    vol_low_tp_mult: float = 0.7        # low vol → tighter TP
+    vol_high_sl_mult: float = 1.5       # high vol → wider SL
+    vol_high_tp_mult: float = 1.3       # high vol → wider TP (not as much as SL)
 
     # ── Momentum Quality Filter ──────────────────────────────
     require_momentum_confirmation: bool = False  # momentum zaten indikator olarak oy veriyor, cift gate yapma

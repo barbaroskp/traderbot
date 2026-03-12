@@ -1052,6 +1052,59 @@ class Strategy:
                 reason=f"composite sentiment {sentiment:+.1f} (F&G={indicators.fear_greed_index:.0f})",
             ))
 
+        # ── Alpha Signal: Funding Rate Mean Reversion ─────────
+        # Extreme positive funding = longs overleveraged → SHORT
+        # Extreme negative funding = shorts overleveraged → LONG
+        funding = snap.funding_rate
+        fr_threshold = cfg.funding_rate_threshold
+        if abs(funding) >= fr_threshold:
+            fr_side = "SHORT" if funding > 0 else "LONG"
+            # Scale weight by how extreme the funding is (1x-3x threshold)
+            fr_intensity = min(3.0, abs(funding) / fr_threshold)
+            fr_weight = getattr(cfg, "weight_funding_rate", 15.0) * (0.5 + fr_intensity * 0.25)
+            votes.append(IndicatorVote(
+                name="funding_rate", side=fr_side,
+                weight=fr_weight,
+                value=funding,
+                reason=f"funding={funding:+.6f} ({fr_intensity:.1f}x threshold, contrarian)",
+            ))
+
+        # ── Alpha Signal: Multi-TF Momentum Alignment ────────
+        # When higher timeframe trend aligns with signal direction
+        htf = indicators.higher_tf_trend
+        if htf != "NEUTRAL":
+            htf_side = "LONG" if htf == "UP" else "SHORT"
+            htf_weight = getattr(cfg, "weight_multi_tf", 15.0)
+            votes.append(IndicatorVote(
+                name="multi_tf", side=htf_side,
+                weight=htf_weight,
+                value=1.0 if htf == "UP" else -1.0,
+                reason=f"higher TF trend={htf}",
+            ))
+
+        # ── Alpha Signal: Volatility Regime ───────────────────
+        # LOW vol → tighter SL/TP, smaller moves expected
+        # HIGH vol → wider SL/TP, bigger moves, more opportunity
+        if indicators.atr > 0 and snap.mid_price > 0:
+            atr_bps = (indicators.atr / snap.mid_price) * 10_000
+            # Classify regime: squeeze_on=True → low vol breakout imminent
+            if indicators.squeeze_on:
+                vol_regime = "SQUEEZE"
+                # Squeeze breakout: vote in direction of momentum
+                if indicators.macd_histogram > 0:
+                    vol_side = "LONG"
+                elif indicators.macd_histogram < 0:
+                    vol_side = "SHORT"
+                else:
+                    vol_side = "NEUTRAL"
+                if vol_side != "NEUTRAL":
+                    votes.append(IndicatorVote(
+                        name="vol_regime", side=vol_side,
+                        weight=getattr(cfg, "weight_vol_regime", 12.0),
+                        value=atr_bps,
+                        reason=f"squeeze breakout → {vol_side} (ATR={atr_bps:.1f}bps)",
+                    ))
+
         # ── Filter to active indicators only ──────────────────
         active_set = set(cfg.active_indicators.split(","))
         if active_set:
