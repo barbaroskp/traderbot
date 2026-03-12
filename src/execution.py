@@ -1089,6 +1089,21 @@ class LiveExecution(ExecutionAdapter):
                 is_paper=False,
             )
 
+        # ── Execution quality tracking ────────────────────────
+        if self.cfg.use_execution_tracking and ref_price > 0:
+            slippage_bps = abs(avg_price - ref_price) / ref_price * 10_000
+            if slippage_bps > self.cfg.max_acceptable_slippage_bps:
+                log.warning(
+                    "live: high slippage detected",
+                    extra={
+                        "symbol": signal.symbol,
+                        "ref_price": ref_price,
+                        "fill_price": avg_price,
+                        "slippage_bps": round(slippage_bps, 2),
+                        "threshold_bps": self.cfg.max_acceptable_slippage_bps,
+                    },
+                )
+
         # ── Place SL + TP ──────────────────────────────────────
         notional = avg_price * filled_qty
         close_side = "SELL" if signal.side == "LONG" else "BUY"

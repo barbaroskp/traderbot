@@ -199,8 +199,9 @@ class Scheduler:
         if closed:
             self.portfolio.apply_closed_trades(closed)
             for c in closed:
-                self.risk.record_trade_result(c.get("realised_pnl", 0))
-                self.strategy.set_cooldown(c.get("symbol", ""))
+                pnl = c.get("realised_pnl", 0)
+                self.risk.record_trade_result(pnl)
+                self.strategy.set_cooldown(c.get("symbol", ""), pnl=pnl)
 
         # ── 5. Generate signals ─────────────────────────────────
         # Refresh open positions after exits
@@ -355,6 +356,11 @@ class Scheduler:
                 daily_mult = self.risk.get_daily_size_multiplier()
                 if daily_mult < 1.0:
                     qty = qty * daily_mult
+
+                # Session-aware sizing (dead zone → smaller positions)
+                session_mult = getattr(sig, "session_size_mult", 1.0)
+                if session_mult < 1.0:
+                    qty = qty * session_mult
 
                 if advice.action == "reduce":
                     qty = qty * 0.5

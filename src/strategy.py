@@ -95,6 +95,8 @@ class Signal:
     momentum_confirmed: bool = False
     vwap_deviation_bps: float = 0.0
     trade_type: str = "scalp"  # "scalp" or "swing"
+    session: str = ""  # trading session name
+    session_size_mult: float = 1.0  # session-based size multiplier
 
     def __post_init__(self) -> None:
         if not self.ts:
@@ -122,6 +124,9 @@ class Strategy:
         self.cfg = cfg
         self.db = db
         self._cooldowns: dict[str, datetime] = {}
+        self._symbol_results: dict[str, list[float]] = {}  # symbol → recent PnL list
+        self._adaptive_score_cache: float | None = None
+        self._adaptive_score_ts: datetime | None = None
 
     def generate_signals(
         self,
@@ -310,6 +315,10 @@ class Strategy:
             if (side == "SHORT" and snap.funding_rate > 0) or \
                (side == "LONG" and snap.funding_rate < 0):
                 weighted_score += scaled_bonus
+        # ── Faz 3: Session Awareness bonus ─────────────────
+        session_info = self._get_session_info(now)
+        weighted_score += session_info["score_bonus"]
+
         weighted_score = min(weighted_score, 100.0)
 
         signal = Signal(
@@ -340,6 +349,8 @@ class Strategy:
             mode=mode,
             momentum_confirmed=momentum_confirmed,
             vwap_deviation_bps=indicators.vwap_deviation_bps,
+            session=session_info["session"],
+            session_size_mult=session_info["size_mult"],
         )
 
         # ── Rejection checks ───────────────────────────────────
@@ -382,6 +393,14 @@ class Strategy:
                 signal.reject_reason = "correlation_limit"
                 self._persist_signal(signal)
                 return None
+
+        # ── Faz 3: Anti-Manipulation Detection ─────────────
+        manipulation_reason = self._detect_manipulation(snap)
+        if manipulation_reason:
+            signal.accepted = False
+            signal.reject_reason = f"manipulation:{manipulation_reason}"
+            self._persist_signal(signal)
+            return None
 
         # Spread too wide
         if snap.spread_bps > self.cfg.max_spread_bps:
@@ -529,6 +548,14 @@ class Strategy:
                 signal.reject_reason = f"ultra_score_{weighted_score:.0f}<{min_score}"
                 self._persist_signal(signal)
                 return None
+
+        # ── Faz 3: Adaptive Quality Gate ─────────────────
+        adaptive_min = self._get_adaptive_min_score()
+        if weighted_score < adaptive_min:
+            signal.accepted = False
+            signal.reject_reason = f"adaptive_quality_{weighted_score:.0f}<{adaptive_min:.0f}"
+            self._persist_signal(signal)
+            return None
 
         # All checks passed
         signal.accepted = True
@@ -1249,16 +1276,175 @@ class Strategy:
 
         return "MEAN_REVERSION"
 
-    def set_cooldown(self, symbol: str) -> None:
-        """Set cooldown after a trade."""
+    def set_cooldown(self, symbol: str, pnl: float = 0.0) -> None:
+        """Set cooldown after a trade. Smart cooldown adjusts based on result."""
         self._cooldowns[symbol] = datetime.now(timezone.utc)
+        # Track per-symbol results for smart cooldown
+        if symbol not in self._symbol_results:
+            self._symbol_results[symbol] = []
+        self._symbol_results[symbol].append(pnl)
+        # Keep last 20 results per symbol
+        if len(self._symbol_results[symbol]) > 20:
+            self._symbol_results[symbol] = self._symbol_results[symbol][-20:]
 
     def _in_cooldown(self, symbol: str, now: datetime) -> bool:
         last = self._cooldowns.get(symbol)
         if last is None:
             return False
+        cooldown_min = self.cfg.cooldown_minutes
+
+        # Smart cooldown: adjust based on recent results for this symbol
+        if self.cfg.use_smart_cooldown and symbol in self._symbol_results:
+            recent = self._symbol_results[symbol][-self.cfg.smart_cooldown_streak_cap:]
+            if recent:
+                last_pnl = recent[-1]
+                if last_pnl < 0:
+                    # Consecutive losses → longer cooldown
+                    loss_streak = 0
+                    for r in reversed(recent):
+                        if r < 0:
+                            loss_streak += 1
+                        else:
+                            break
+                    loss_streak = min(loss_streak, self.cfg.smart_cooldown_streak_cap)
+                    cooldown_min *= self.cfg.smart_cooldown_loss_multiplier ** loss_streak
+                elif last_pnl > 0:
+                    # Win → shorter cooldown
+                    cooldown_min *= self.cfg.smart_cooldown_win_multiplier
+
         elapsed_min = (now - last).total_seconds() / 60
-        return elapsed_min < self.cfg.cooldown_minutes
+        return elapsed_min < cooldown_min
+
+    # ── Faz 3: Adaptive Quality Gate ──────────────────────────
+
+    def _get_adaptive_min_score(self) -> float:
+        """Compute adaptive minimum weighted score based on recent performance."""
+        if not self.cfg.use_adaptive_quality:
+            return self.cfg.adaptive_quality_base_score
+
+        # Cache for 1 minute to avoid DB hits every snapshot
+        now = datetime.now(timezone.utc)
+        if (
+            self._adaptive_score_cache is not None
+            and self._adaptive_score_ts is not None
+            and (now - self._adaptive_score_ts).total_seconds() < 60
+        ):
+            return self._adaptive_score_cache
+
+        try:
+            trades = self.db.fetch_all(
+                "SELECT realised_pnl FROM positions WHERE status='CLOSED' "
+                "ORDER BY closed_at DESC LIMIT ?",
+                (self.cfg.adaptive_quality_lookback,),
+            )
+        except Exception:
+            trades = []
+
+        if len(trades) < self.cfg.adaptive_quality_min_trades:
+            self._adaptive_score_cache = self.cfg.adaptive_quality_base_score
+            self._adaptive_score_ts = now
+            return self._adaptive_score_cache
+
+        wins = sum(1 for t in trades if t["realised_pnl"] > 0)
+        losses = len(trades) - wins
+        win_rate = wins / len(trades) if trades else 0.5
+
+        # High win rate → lower threshold (be more aggressive)
+        # Low win rate → higher threshold (be more selective)
+        score = self.cfg.adaptive_quality_base_score
+        if win_rate >= 0.55:
+            # Winning → relax threshold
+            score += self.cfg.adaptive_quality_win_adjust * (win_rate - 0.5) * 20
+        elif win_rate <= 0.45:
+            # Losing → tighten threshold
+            score += self.cfg.adaptive_quality_loss_adjust * (0.5 - win_rate) * 20
+
+        # Check recent streak
+        streak = 0
+        if trades:
+            last_positive = trades[0]["realised_pnl"] > 0
+            for t in trades:
+                if (t["realised_pnl"] > 0) == last_positive:
+                    streak += 1
+                else:
+                    break
+            if not last_positive:
+                # Loss streak → tighten more aggressively
+                score += min(streak, 5) * 2.0
+
+        score = max(self.cfg.adaptive_quality_min_score,
+                    min(self.cfg.adaptive_quality_max_score, score))
+
+        self._adaptive_score_cache = score
+        self._adaptive_score_ts = now
+        return score
+
+    # ── Faz 3: Anti-Manipulation Detection ────────────────────
+
+    def _detect_manipulation(self, snap: SymbolSnapshot) -> str | None:
+        """Detect potential manipulation patterns. Returns reason string or None."""
+        if not self.cfg.use_anti_manipulation:
+            return None
+
+        ind = snap.indicators
+        if not ind.valid:
+            return None
+
+        # Wick ratio check: large wicks relative to body = stop hunting
+        if ind.recent_high > 0 and ind.recent_low > 0 and snap.mid_price > 0:
+            recent_range = ind.recent_high - ind.recent_low
+            if recent_range > 0:
+                range_bps = (recent_range / snap.mid_price) * 10_000
+                # If range is huge but price ended near where it started → wick manipulation
+                if range_bps > self.cfg.rapid_reversal_bps:
+                    body_bps = abs(ind.price_velocity_bps) * self.cfg.wick_lookback_bars
+                    if body_bps > 0 and range_bps / body_bps > self.cfg.wick_ratio_threshold:
+                        return f"wick_manipulation (range={range_bps:.0f}bps, body={body_bps:.0f}bps)"
+
+        # Rapid velocity reversal = possible pump & dump
+        if abs(ind.price_acceleration) > 0 and abs(ind.price_velocity_bps) > self.cfg.rapid_reversal_bps:
+            # Acceleration opposite to velocity = reversal in progress
+            if (ind.price_velocity_bps > 0 and ind.price_acceleration < -0.5) or \
+               (ind.price_velocity_bps < 0 and ind.price_acceleration > 0.5):
+                return f"rapid_reversal (vel={ind.price_velocity_bps:.1f}bps, acc={ind.price_acceleration:.2f})"
+
+        return None
+
+    # ── Faz 3: Session Awareness ──────────────────────────────
+
+    def _get_session_info(self, now: datetime) -> dict[str, Any]:
+        """Determine current trading session and return multipliers."""
+        if not self.cfg.use_session_awareness:
+            return {"session": "any", "size_mult": 1.0, "score_bonus": 0.0}
+
+        hour = now.hour
+        session = "off_hours"
+        size_mult = 1.0
+        score_bonus = 0.0
+
+        # EU/US overlap (13-16 UTC) = best liquidity
+        if self.cfg.session_us_start <= hour < self.cfg.session_eu_end:
+            session = "eu_us_overlap"
+            score_bonus = self.cfg.session_overlap_bonus_score
+
+        # US session
+        elif self.cfg.session_us_start <= hour < self.cfg.session_us_end:
+            session = "us"
+
+        # EU session
+        elif self.cfg.session_eu_start <= hour < self.cfg.session_eu_end:
+            session = "eu"
+
+        # Asian session (lower vol, tighter ranges)
+        elif self.cfg.session_asian_start <= hour < self.cfg.session_asian_end:
+            session = "asian"
+
+        # Dead zone (22-00 UTC)
+        if hour >= self.cfg.session_dead_zone_start or hour < self.cfg.session_dead_zone_end:
+            session = "dead_zone"
+            size_mult = self.cfg.session_dead_zone_size_mult
+
+        return {"session": session, "size_mult": size_mult, "score_bonus": score_bonus}
 
     def _get_min_confluence(self, risk_state: str) -> int:
         """How many indicators must agree."""

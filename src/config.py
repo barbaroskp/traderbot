@@ -209,6 +209,49 @@ class Settings(BaseSettings):
     vol_high_sl_mult: float = 1.5       # high vol → wider SL
     vol_high_tp_mult: float = 1.3       # high vol → wider TP (not as much as SL)
 
+    # ── Faz 3: Adaptive Quality + Anti-Manipulation ──────────
+
+    # Adaptive Quality Gate: min weighted_score otomatik ayarlanir
+    use_adaptive_quality: bool = True
+    adaptive_quality_lookback: int = 50     # son 50 trade'e bak
+    adaptive_quality_min_trades: int = 10   # min 10 trade olana kadar default kullan
+    adaptive_quality_base_score: float = 40.0   # baslangic min score
+    adaptive_quality_win_adjust: float = -2.0   # win streak → daha agresif (score -2)
+    adaptive_quality_loss_adjust: float = 5.0   # loss streak → daha secici (score +5)
+    adaptive_quality_max_score: float = 70.0    # max eşik (cok kisitlama)
+    adaptive_quality_min_score: float = 25.0    # min esik (her zaman biraz filtre)
+
+    # Anti-Manipulation Detection
+    use_anti_manipulation: bool = True
+    wick_ratio_threshold: float = 3.0     # wick/body > 3 = manipulation sinyali
+    wick_lookback_bars: int = 3           # son 3 bar'a bak
+    rapid_reversal_bps: float = 50.0      # 50bps+ ani reversal = stop hunt olabilir
+    manipulation_cooldown_bars: int = 5   # manipulation sonrasi 5 bar bekle
+
+    # Session-Aware Trading (UTC saatleri)
+    use_session_awareness: bool = True
+    session_asian_start: int = 0          # 00:00 UTC (Tokyo 09:00)
+    session_asian_end: int = 8            # 08:00 UTC
+    session_eu_start: int = 7             # 07:00 UTC (London 08:00)
+    session_eu_end: int = 16              # 16:00 UTC
+    session_us_start: int = 13            # 13:00 UTC (NY 09:00)
+    session_us_end: int = 22              # 22:00 UTC
+    session_dead_zone_start: int = 22     # 22:00-00:00 UTC = dusuk likidite
+    session_dead_zone_end: int = 0
+    session_dead_zone_size_mult: float = 0.5  # dead zone'da %50 boyut
+    session_overlap_bonus_score: float = 5.0  # EU/US overlap bonus (13-16 UTC)
+
+    # Smart Cooldown: kaybedilen pair'de daha uzun, kazanılan pair'de kisaltilmis
+    use_smart_cooldown: bool = True
+    smart_cooldown_loss_multiplier: float = 2.0  # loss → cooldown 2x
+    smart_cooldown_win_multiplier: float = 0.5   # win → cooldown 0.5x
+    smart_cooldown_streak_cap: int = 3            # max 3x cooldown
+
+    # Execution Quality Tracking
+    use_execution_tracking: bool = True
+    max_acceptable_slippage_bps: float = 15.0     # 15bps ustu slippage → uyar
+    slippage_reject_threshold_bps: float = 30.0   # 30bps ustu → reject signal for this pair
+
     # ── Momentum Quality Filter ──────────────────────────────
     require_momentum_confirmation: bool = False  # momentum zaten indikator olarak oy veriyor, cift gate yapma
     momentum_bonus_weight: float = 15.0    # bigger momentum bonus (was 10)
