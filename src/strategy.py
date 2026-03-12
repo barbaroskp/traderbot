@@ -737,6 +737,21 @@ class Strategy:
                     value=imb, reason=f"orderbook ask heavy {imb:.2f}",
                 ))
 
+        # 6b. Order Flow Imbalance (depth ratio signal)
+        total_depth = snap.bid_depth_usdt + snap.ask_depth_usdt
+        if total_depth > 0:
+            bid_ratio = snap.bid_depth_usdt / total_depth
+            if bid_ratio >= cfg.orderflow_strong_threshold:
+                votes.append(IndicatorVote(
+                    name="orderflow", side="LONG", weight=cfg.weight_orderflow,
+                    value=bid_ratio, reason=f"orderflow bid dominant {bid_ratio:.2f}",
+                ))
+            elif bid_ratio <= cfg.orderflow_weak_threshold:
+                votes.append(IndicatorVote(
+                    name="orderflow", side="SHORT", weight=cfg.weight_orderflow,
+                    value=bid_ratio, reason=f"orderflow ask dominant {bid_ratio:.2f}",
+                ))
+
         # 7. Volume spike vote (trend-aligned)
         if indicators.volume_spike and td in ("UP", "DOWN"):
             spike_side = "LONG" if td == "UP" else "SHORT"
@@ -1186,6 +1201,7 @@ class Strategy:
         "liq_cascade":     "weight_liq_cascade",
         "volume_profile":  "weight_volume_profile",
         "sentiment":       "weight_sentiment",
+        "orderflow":       "weight_orderflow",
     }
 
     # Multiplier caps – the highest multiplier each indicator can apply.

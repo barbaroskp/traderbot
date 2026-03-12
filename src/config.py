@@ -124,7 +124,7 @@ class Settings(BaseSettings):
     # ── Indicator Simplification ─────────────────────────────
     # 22 indikator var ama ~7 bagimsiz bilgi kaynagi. Sadece bagimsiz olanlari kullan.
     # Aktif olmayanlar hesaplanir ama oy sayisina/agirliga katilmaz.
-    active_indicators: str = "ema_zscore,rsi,macd,bollinger,adx,orderbook,obv,vwap,funding_rate,multi_tf,vol_regime"
+    active_indicators: str = "ema_zscore,rsi,macd,bollinger,adx,orderbook,obv,vwap,funding_rate,multi_tf,vol_regime,orderflow"
 
     # Weights for combined score (normalized to 0-100 at scoring time)
     weight_ema: float = 25.0
@@ -251,6 +251,45 @@ class Settings(BaseSettings):
     use_execution_tracking: bool = True
     max_acceptable_slippage_bps: float = 15.0     # 15bps ustu slippage → uyar
     slippage_reject_threshold_bps: float = 30.0   # 30bps ustu → reject signal for this pair
+
+    # ── Faz 4: Drawdown-Based Leverage Scaling ─────────────
+    use_drawdown_leverage_scaling: bool = True
+    drawdown_leverage_start_pct: float = 5.0     # drawdown %5'den sonra leverage azalt
+    drawdown_leverage_full_pct: float = 15.0     # drawdown %15'te minimum leverage'a in
+    drawdown_leverage_min_mult: float = 0.4      # minimum leverage multiplier (60% azaltma)
+
+    # ── Faz 4: Portfolio Heat Monitor ──────────────────────
+    use_portfolio_heat: bool = True
+    portfolio_heat_max_pct: float = 60.0         # max portfolio risk: bakiyenin %60'i
+    portfolio_heat_reduce_at_pct: float = 40.0   # %40'ta yeni pozisyon buyukluklerini kucult
+    portfolio_heat_reduce_mult: float = 0.5      # pozisyon boyutu carpani (heat yuksekken)
+
+    # ── Faz 5: Order Flow Imbalance Signal ─────────────────
+    weight_orderflow: float = 12.0
+    orderflow_strong_threshold: float = 0.65     # bid_depth / total_depth > 0.65 → LONG
+    orderflow_weak_threshold: float = 0.35       # bid_depth / total_depth < 0.35 → SHORT
+
+    # ── Faz 5: Liquidity-Adjusted Sizing ───────────────────
+    use_liquidity_sizing: bool = True
+    liquidity_sizing_max_pct: float = 2.0        # max %2 of visible depth
+    liquidity_sizing_depth_floor_usdt: float = 3000.0  # derinlik alt sinir
+
+    # ── Faz 6: Rolling Sharpe Tracking ─────────────────────
+    use_rolling_sharpe: bool = True
+    rolling_sharpe_lookback: int = 50            # son 50 islem
+    rolling_sharpe_min_trades: int = 15          # minimum veri
+    rolling_sharpe_pause_threshold: float = -0.5 # Sharpe < -0.5 → yeni islem durdur
+    rolling_sharpe_reduce_threshold: float = 0.0 # Sharpe < 0 → pozisyon kucult
+
+    # ── Faz 6: Strategy Decay Detection ────────────────────
+    use_decay_detection: bool = True
+    decay_lookback_recent: int = 20              # son 20 islem
+    decay_lookback_baseline: int = 100           # referans 100 islem
+    decay_min_trades: int = 30                   # minimum veri (recent + some baseline)
+    decay_winrate_drop_pct: float = 15.0         # win rate %15+ dustuyse decay
+    decay_pf_drop_pct: float = 30.0              # profit factor %30+ dustuyse decay
+    decay_action: str = "reduce"                 # "reduce" veya "pause"
+    decay_size_mult: float = 0.5                 # decay varken pozisyon buyuklugu carpani
 
     # ── Momentum Quality Filter ──────────────────────────────
     require_momentum_confirmation: bool = False  # momentum zaten indikator olarak oy veriyor, cift gate yapma

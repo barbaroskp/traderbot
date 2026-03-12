@@ -556,6 +556,167 @@ class RiskManager:
         self._check_daily_reset()
         return self._daily_pnl
 
+    # ── Faz 4: Drawdown-Based Leverage Scaling ──────────────────────
+
+    def get_drawdown_leverage_mult(self) -> float:
+        """Scale down leverage as drawdown deepens.
+
+        Linear interpolation between start and full drawdown thresholds.
+        Returns 1.0 when no scaling, down to drawdown_leverage_min_mult at full threshold.
+        """
+        if not self.cfg.use_drawdown_leverage_scaling:
+            return 1.0
+        dd = self.drawdown_pct
+        start = self.cfg.drawdown_leverage_start_pct
+        full = self.cfg.drawdown_leverage_full_pct
+        min_mult = self.cfg.drawdown_leverage_min_mult
+
+        if dd <= start:
+            return 1.0
+        if dd >= full:
+            return min_mult
+
+        # Linear interpolation
+        ratio = (dd - start) / (full - start)
+        return 1.0 - ratio * (1.0 - min_mult)
+
+    # ── Faz 4: Portfolio Heat Monitor ──────────────────────────────
+
+    def get_portfolio_heat_mult(self, current_total_margin: float) -> float:
+        """Reduce new position sizes when portfolio heat is high.
+
+        Heat = current_total_margin / balance as percentage.
+        Returns 1.0 when below reduce threshold, reduce_mult when above,
+        and 0.0 when at max threshold (no new positions).
+        """
+        if not self.cfg.use_portfolio_heat:
+            return 1.0
+        if self._current_balance <= 0:
+            return 0.0
+
+        heat_pct = (current_total_margin / self._current_balance) * 100
+        if heat_pct >= self.cfg.portfolio_heat_max_pct:
+            return 0.0
+        if heat_pct >= self.cfg.portfolio_heat_reduce_at_pct:
+            return self.cfg.portfolio_heat_reduce_mult
+        return 1.0
+
+    # ── Faz 6: Rolling Sharpe Ratio ────────────────────────────────
+
+    def get_rolling_sharpe(self) -> float | None:
+        """Compute rolling Sharpe ratio from recent closed trades.
+
+        Returns None if insufficient data.
+        """
+        if not self.cfg.use_rolling_sharpe:
+            return None
+
+        try:
+            trades = self.db.fetch_all(
+                "SELECT realised_pnl FROM positions WHERE status='CLOSED' "
+                "ORDER BY closed_at DESC LIMIT ?",
+                (self.cfg.rolling_sharpe_lookback,),
+            )
+        except Exception:
+            return None
+
+        if len(trades) < self.cfg.rolling_sharpe_min_trades:
+            return None
+
+        pnls = [t["realised_pnl"] for t in trades]
+        mean_pnl = sum(pnls) / len(pnls)
+        if len(pnls) < 2:
+            return None
+        variance = sum((p - mean_pnl) ** 2 for p in pnls) / (len(pnls) - 1)
+        std_pnl = variance ** 0.5
+        if std_pnl <= 0:
+            return 0.0
+
+        # Annualized-ish: multiply by sqrt(trades_per_day * 365)
+        # For simplicity, just return raw Sharpe-like ratio
+        sharpe = mean_pnl / std_pnl
+        return sharpe
+
+    def can_trade_by_sharpe(self) -> tuple[bool, float]:
+        """Check if Sharpe allows trading. Returns (can_trade, size_multiplier)."""
+        sharpe = self.get_rolling_sharpe()
+        if sharpe is None:
+            return True, 1.0  # insufficient data, allow trading
+
+        if sharpe < self.cfg.rolling_sharpe_pause_threshold:
+            return False, 0.0  # Sharpe too negative, pause
+        if sharpe < self.cfg.rolling_sharpe_reduce_threshold:
+            return True, 0.5  # Sharpe negative but not terrible, reduce size
+        return True, 1.0
+
+    # ── Faz 6: Strategy Decay Detection ────────────────────────────
+
+    def detect_strategy_decay(self) -> tuple[bool, str]:
+        """Compare recent vs baseline performance to detect strategy decay.
+
+        Returns (is_decaying, reason).
+        """
+        if not self.cfg.use_decay_detection:
+            return False, ""
+
+        try:
+            all_trades = self.db.fetch_all(
+                "SELECT realised_pnl FROM positions WHERE status='CLOSED' "
+                "ORDER BY closed_at DESC LIMIT ?",
+                (self.cfg.decay_lookback_baseline,),
+            )
+        except Exception:
+            return False, ""
+
+        if len(all_trades) < self.cfg.decay_min_trades:
+            return False, ""
+
+        recent = all_trades[:self.cfg.decay_lookback_recent]
+        baseline = all_trades[self.cfg.decay_lookback_recent:]
+
+        if not baseline or not recent:
+            return False, ""
+
+        # Win rate comparison
+        recent_wins = sum(1 for t in recent if t["realised_pnl"] > 0)
+        baseline_wins = sum(1 for t in baseline if t["realised_pnl"] > 0)
+        recent_wr = recent_wins / len(recent) * 100
+        baseline_wr = baseline_wins / len(baseline) * 100
+
+        # Profit factor comparison
+        def _pf(trades):
+            gross_profit = sum(t["realised_pnl"] for t in trades if t["realised_pnl"] > 0)
+            gross_loss = abs(sum(t["realised_pnl"] for t in trades if t["realised_pnl"] < 0))
+            return gross_profit / gross_loss if gross_loss > 0 else 99.0
+
+        recent_pf = _pf(recent)
+        baseline_pf = _pf(baseline)
+
+        reasons = []
+        if baseline_wr > 0:
+            wr_drop = baseline_wr - recent_wr
+            if wr_drop >= self.cfg.decay_winrate_drop_pct:
+                reasons.append(f"winrate_drop:{wr_drop:.1f}%({recent_wr:.0f}vs{baseline_wr:.0f})")
+
+        if baseline_pf > 0 and baseline_pf < 90:
+            pf_drop_pct = ((baseline_pf - recent_pf) / baseline_pf) * 100
+            if pf_drop_pct >= self.cfg.decay_pf_drop_pct:
+                reasons.append(f"pf_drop:{pf_drop_pct:.0f}%({recent_pf:.2f}vs{baseline_pf:.2f})")
+
+        if reasons:
+            return True, "; ".join(reasons)
+        return False, ""
+
+    def get_decay_size_mult(self) -> float:
+        """Return size multiplier if strategy is decaying."""
+        is_decaying, reason = self.detect_strategy_decay()
+        if is_decaying:
+            if self.cfg.decay_action == "pause":
+                return 0.0
+            log.warning("strategy decay detected", extra={"reason": reason})
+            return self.cfg.decay_size_mult
+        return 1.0
+
     def get_diagnostics(self) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         minutes_in_state = (now - self._state_entered_at).total_seconds() / 60
@@ -574,6 +735,9 @@ class RiskManager:
             "daily_kill_active": self.daily_kill_active,
             "daily_stop_active": self.daily_stop_active,
             "daily_reduce_active": self.daily_reduce_active,
+            "drawdown_leverage_mult": round(self.get_drawdown_leverage_mult(), 3),
+            "rolling_sharpe": self.get_rolling_sharpe(),
+            "strategy_decaying": self.detect_strategy_decay()[0],
         }
 
     def _time_to_recovery(self) -> float:

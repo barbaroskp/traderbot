@@ -267,6 +267,9 @@ class Scheduler:
         executed = 0
 
         daily_blocked = not self.risk.can_open_new_trade()
+        sharpe_can_trade, sharpe_mult = self.risk.can_trade_by_sharpe()
+        entries_blocked = soft_kill_active or daily_blocked or not sharpe_can_trade
+
         if soft_kill_active:
             log.warning(
                 "soft kill-switch active: new entries paused",
@@ -284,6 +287,14 @@ class Scheduler:
                     "stop_active": self.risk.daily_stop_active,
                 },
             )
+        elif not sharpe_can_trade:
+            log.warning(
+                "rolling sharpe pause: new entries blocked",
+                extra={"sharpe": self.risk.get_rolling_sharpe()},
+            )
+
+        if entries_blocked:
+            pass  # all blockers logged above
         else:
             for sig in signals_sorted:
                 # Find matching snapshot
@@ -319,6 +330,11 @@ class Scheduler:
                     effective_leverage = min(effective_leverage, self.cfg.max_leverage_allowed)
 
                 final_leverage = effective_leverage or self.cfg.leverage
+
+                # Faz 4: Drawdown-based leverage scaling
+                dd_mult = self.risk.get_drawdown_leverage_mult()
+                if dd_mult < 1.0:
+                    final_leverage = max(1, int(final_leverage * dd_mult))
 
                 # ── 2. Compute position size (margin-based: margin × leverage = notional) ──
                 qty = self.risk.compute_position_size(
@@ -361,6 +377,35 @@ class Scheduler:
                 session_mult = getattr(sig, "session_size_mult", 1.0)
                 if session_mult < 1.0:
                     qty = qty * session_mult
+
+                # Faz 4: Portfolio heat reduction
+                heat_mult = self.risk.get_portfolio_heat_mult(current_margin)
+                if heat_mult <= 0:
+                    log.warning("portfolio heat max: skipping new entry", extra={"symbol": sig.symbol})
+                    continue
+                if heat_mult < 1.0:
+                    qty = qty * heat_mult
+
+                # Faz 6: Sharpe-based sizing
+                if sharpe_mult < 1.0:
+                    qty = qty * sharpe_mult
+
+                # Faz 6: Strategy decay reduction
+                decay_mult = self.risk.get_decay_size_mult()
+                if decay_mult <= 0:
+                    log.warning("strategy decay pause: skipping entry", extra={"symbol": sig.symbol})
+                    continue
+                if decay_mult < 1.0:
+                    qty = qty * decay_mult
+
+                # Faz 5: Liquidity-adjusted sizing cap
+                if self.cfg.use_liquidity_sizing:
+                    side_depth = snap.bid_depth_usdt if sig.side == "LONG" else snap.ask_depth_usdt
+                    effective_depth = max(side_depth, self.cfg.liquidity_sizing_depth_floor_usdt)
+                    max_notional_liq = effective_depth * (self.cfg.liquidity_sizing_max_pct / 100.0)
+                    max_qty_liq = max_notional_liq / snap.mid_price
+                    if qty > max_qty_liq:
+                        qty = max_qty_liq
 
                 if advice.action == "reduce":
                     qty = qty * 0.5
