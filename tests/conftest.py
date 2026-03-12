@@ -23,6 +23,7 @@ def cfg() -> Settings:
         db_path=":memory:",
         log_level="DEBUG",
         log_file="",
+        use_tiered_tp=False,
     )
 
 

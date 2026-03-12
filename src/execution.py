@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -249,36 +250,62 @@ class PaperExecution(ExecutionAdapter):
 
         # ── Compute SL / TP prices ──────────────────────────────
         sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, fill_price, getattr(signal, "trade_type", "scalp"))
+
+        # ── SL Randomization (stop hunting korumasi) ──────────
+        # SL'yi tam hesaplanan noktaya degil, biraz daha geriye koy
+        # Boylece diger botlarla ayni SL seviyesine dusmuyor
+        if self.cfg.use_sl_randomization:
+            sl_offset = random.uniform(self.cfg.sl_random_min_bps, self.cfg.sl_random_max_bps)
+            sl_bps += sl_offset  # SL'yi biraz genislet (daha guvenli)
+
         if signal.side == "LONG":
             sl_price = fill_price * (1 - sl_bps / 10_000)
-            tp_price = fill_price * (1 + tp_bps / 10_000)
         else:
             sl_price = fill_price * (1 + sl_bps / 10_000)
-            tp_price = fill_price * (1 - tp_bps / 10_000)
 
-        # Partial TP
+        # ── Tiered TP (3 kademeli cikis) ──────────────────────
         tp1_oid = ""
         tp1_price = 0.0
         tp1_qty = 0.0
-        tp2_qty = qty
-        if self.cfg.use_partial_tp and 0 < self.cfg.partial_tp_fraction < 1:
-            tp1_qty = qty * self.cfg.partial_tp_fraction
-            tp2_qty = qty - tp1_qty
-            tp1_bps = tp_bps * self.cfg.partial_tp_trigger_pct
+        tp2_oid = ""
+        tp2_price = 0.0
+        tp2_qty = 0.0
+        tp3_qty = 0.0  # trailing stop ile yonetilecek kisim
+
+        if self.cfg.use_tiered_tp:
+            # TP1: hizli kar al (%40 pozisyon, %50 TP hedefinde)
+            tp1_bps = tp_bps * self.cfg.tiered_tp1_ratio
+            tp1_qty = qty * self.cfg.tiered_tp1_fraction
             if signal.side == "LONG":
                 tp1_price = fill_price * (1 + tp1_bps / 10_000)
             else:
                 tp1_price = fill_price * (1 - tp1_bps / 10_000)
-            if tp1_qty > 0 and tp2_qty > 0:
-                tp1_oid = generate_client_order_id()
+            tp1_oid = generate_client_order_id()
+
+            # TP2: tam hedef (%30 pozisyon, %100 TP hedefinde)
+            tp2_bps = tp_bps * self.cfg.tiered_tp2_ratio
+            tp2_qty = qty * self.cfg.tiered_tp2_fraction
+            if signal.side == "LONG":
+                tp2_price = fill_price * (1 + tp2_bps / 10_000)
             else:
-                tp1_qty = 0.0
-                tp2_qty = qty
+                tp2_price = fill_price * (1 - tp2_bps / 10_000)
+            tp2_oid = generate_client_order_id()
+
+            # TP3: kalan %30 → trailing stop ile yonetilecek (order yok, check_exits halleder)
+            tp3_qty = qty - tp1_qty - tp2_qty
+        else:
+            # Eski sistem: tek TP
+            if signal.side == "LONG":
+                tp2_price = fill_price * (1 + tp_bps / 10_000)
+            else:
+                tp2_price = fill_price * (1 - tp_bps / 10_000)
+            tp2_qty = qty
+            tp2_oid = generate_client_order_id()
 
         sl_oid = generate_client_order_id()
-        tp_oid = generate_client_order_id()
 
         # ── Persist SL order ────────────────────────────────────
+        exit_side = "SHORT" if signal.side == "LONG" else "LONG"
         self.db.insert(
             "orders",
             {
@@ -286,7 +313,7 @@ class PaperExecution(ExecutionAdapter):
                 "exchange_order_id": f"paper_{sl_oid}",
                 "ts": now,
                 "symbol": signal.symbol,
-                "side": "SHORT" if signal.side == "LONG" else "LONG",
+                "side": exit_side,
                 "order_type": "STOP_MARKET",
                 "price": sl_price,
                 "qty": qty,
@@ -309,7 +336,7 @@ class PaperExecution(ExecutionAdapter):
                     "exchange_order_id": f"paper_{tp1_oid}",
                     "ts": now,
                     "symbol": signal.symbol,
-                    "side": "SHORT" if signal.side == "LONG" else "LONG",
+                    "side": exit_side,
                     "order_type": "TAKE_PROFIT",
                     "price": tp1_price,
                     "qty": tp1_qty,
@@ -324,27 +351,28 @@ class PaperExecution(ExecutionAdapter):
                 },
             )
 
-        self.db.insert(
-            "orders",
-            {
-                "client_order_id": tp_oid,
-                "exchange_order_id": f"paper_{tp_oid}",
-                "ts": now,
-                "symbol": signal.symbol,
-                "side": "SHORT" if signal.side == "LONG" else "LONG",
-                "order_type": "TAKE_PROFIT",
-                "price": tp_price,
-                "qty": tp2_qty,
-                "status": "PENDING",
-                "filled_qty": 0,
-                "avg_fill_price": 0,
-                "is_paper": 1,
-                "parent_order_id": client_oid,
-                "reduce_only": 1,
-                "tp_level": 2 if tp1_oid else 1,
-                "updated_at": now,
-            },
-        )
+        if tp2_oid:
+            self.db.insert(
+                "orders",
+                {
+                    "client_order_id": tp2_oid,
+                    "exchange_order_id": f"paper_{tp2_oid}",
+                    "ts": now,
+                    "symbol": signal.symbol,
+                    "side": exit_side,
+                    "order_type": "TAKE_PROFIT",
+                    "price": tp2_price,
+                    "qty": tp2_qty,
+                    "status": "PENDING",
+                    "filled_qty": 0,
+                    "avg_fill_price": 0,
+                    "is_paper": 1,
+                    "parent_order_id": client_oid,
+                    "reduce_only": 1,
+                    "tp_level": 2,
+                    "updated_at": now,
+                },
+            )
 
         # ── Open position ──────────────────────────────────────
         self.db.insert(
@@ -361,12 +389,14 @@ class PaperExecution(ExecutionAdapter):
                 "realised_pnl": 0,
                 "sl_order_id": sl_oid,
                 "tp1_order_id": tp1_oid,
-                "tp_order_id": tp_oid,
+                "tp_order_id": tp2_oid,
+                "tp3_qty": tp3_qty,
                 "sl_bps": sl_bps,
                 "tp_bps": tp_bps,
                 "leverage": leverage_override or self.cfg.leverage,
                 "breakeven_triggered": 0,
                 "partial_tp_filled": 0,
+                "tp2_filled": 0,
                 "highest_price": fill_price,
                 "lowest_price": fill_price,
                 "opened_at": now,
@@ -389,7 +419,8 @@ class PaperExecution(ExecutionAdapter):
                 "fill_price": fill_price,
                 "notional": round(notional, 2),
                 "sl": round(sl_price, 6),
-                "tp": round(tp_price, 6),
+                "tp2": round(tp2_price, 6),
+                "tiered": self.cfg.use_tiered_tp,
             },
         )
 
@@ -577,18 +608,72 @@ class PaperExecution(ExecutionAdapter):
                 elif side == "SHORT" and mark >= sl_price:
                     exit_reason = "SL"
 
-            # ── TP check ────────────────────────────────────────
-            if not exit_reason:
-                tp_order = self.db.fetch_one(
+            # ── TP2 check (tiered: partial close of 30% at full TP target) ──
+            if not exit_reason and pos.get("tp_order_id"):
+                tp2_order = self.db.fetch_one(
                     "SELECT * FROM orders WHERE client_order_id=? AND status='PENDING'",
                     (pos.get("tp_order_id", ""),),
                 )
-                if tp_order:
-                    tp_price = tp_order["price"]
-                    if side == "LONG" and mark >= tp_price:
-                        exit_reason = "TP"
-                    elif side == "SHORT" and mark <= tp_price:
-                        exit_reason = "TP"
+                if tp2_order:
+                    tp2_price = tp2_order["price"]
+                    hit_tp2 = (side == "LONG" and mark >= tp2_price) or (
+                        side == "SHORT" and mark <= tp2_price
+                    )
+                    if hit_tp2:
+                        tp3_remaining = float(pos.get("tp3_qty", 0))
+                        if tp3_remaining > 0 and self.cfg.use_tiered_tp:
+                            # Tiered mode: TP2 is partial, TP3 remains for trailing
+                            remaining = self._apply_partial_tp(
+                                pos, mark, tp2_order["qty"], tp2_order["client_order_id"]
+                            )
+                            qty = remaining
+                            pos["remaining_qty"] = remaining
+                            pos["qty"] = remaining
+                            self.db.execute(
+                                "UPDATE positions SET tp2_filled=1 WHERE id=?",
+                                (pos["id"],),
+                            )
+                            # Move SL to breakeven if not already
+                            if not pos.get("breakeven_triggered", 0):
+                                if side == "LONG":
+                                    be_price = entry * (1 + self.cfg.breakeven_buffer_bps / 10_000)
+                                else:
+                                    be_price = entry * (1 - self.cfg.breakeven_buffer_bps / 10_000)
+                                self._update_sl_order_price(pos, side, be_price)
+                                self.db.execute(
+                                    "UPDATE positions SET breakeven_triggered=1 WHERE id=?",
+                                    (pos["id"],),
+                                )
+                        else:
+                            # Non-tiered: TP2 is full close
+                            exit_reason = "TP"
+
+            # ── TP3 trailing stop check (remaining qty after TP1+TP2) ──
+            if (
+                not exit_reason
+                and self.cfg.use_tiered_tp
+                and self.cfg.tiered_tp3_trailing
+                and pos.get("tp2_filled", 0)
+                and float(pos.get("tp3_qty", 0)) > 0
+                and qty > 0
+            ):
+                activation_bps = self.cfg.tiered_tp3_activation_bps
+                trail_bps = self.cfg.tiered_tp3_trail_bps
+                if profit_bps >= activation_bps:
+                    # Trailing stop for TP3: track from highest/lowest
+                    if side == "LONG":
+                        trail_sl = highest * (1 - trail_bps / 10_000)
+                        if mark <= trail_sl:
+                            exit_reason = "TP3_TRAIL"
+                        else:
+                            # Tighten SL to trailing level
+                            self._update_sl_order_price(pos, side, trail_sl)
+                    else:
+                        trail_sl = lowest * (1 + trail_bps / 10_000)
+                        if mark >= trail_sl:
+                            exit_reason = "TP3_TRAIL"
+                        else:
+                            self._update_sl_order_price(pos, side, trail_sl)
 
             # ── Timeout check ───────────────────────────────────
             if not exit_reason:
@@ -609,10 +694,11 @@ class PaperExecution(ExecutionAdapter):
     async def _close_position(
         self, pos: dict[str, Any], exit_price: float, reason: str
     ) -> dict[str, Any]:
-        """Close a paper position."""
+        """Close a paper position (remaining qty after any partial TPs)."""
         now = datetime.now(timezone.utc).isoformat()
         entry = pos["entry_price"]
-        qty = pos["qty"]
+        # Use remaining_qty (after partial TP fills), not original qty
+        qty = float(pos.get("remaining_qty", pos["qty"]))
         side = pos["side"]
 
         if side == "LONG":
@@ -620,15 +706,19 @@ class PaperExecution(ExecutionAdapter):
         else:
             pnl = (entry - exit_price) * qty
 
-        # Fees: entry (on notional at open) + exit (on notional at close)
+        # Fees: entry (on remaining notional) + exit
         entry_fee = entry * qty * (self.cfg.fee_rate_bps / 10_000)
         exit_fee = exit_price * qty * (self.cfg.fee_rate_bps / 10_000)
         pnl -= entry_fee + exit_fee
 
+        # Add already-realized PnL from partial TP fills
+        prior_pnl = float(pos.get("realised_pnl", 0))
+        total_pnl = prior_pnl + pnl
+
         # Update position (store exit_reason for analytics)
         self.db.execute(
             "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=?, exit_reason=? WHERE id=?",
-            (pnl, now, reason, pos["id"]),
+            (total_pnl, now, reason, pos["id"]),
         )
 
         # Mark SL/TP orders as cancelled (the one that didn't trigger)
@@ -649,12 +739,13 @@ class PaperExecution(ExecutionAdapter):
                 "reason": reason,
                 "entry": entry,
                 "exit": exit_price,
-                "pnl": round(pnl, 4),
-                "qty": qty,
+                "pnl": round(total_pnl, 4),
+                "remaining_qty": qty,
+                "prior_partial_pnl": round(prior_pnl, 4),
             },
         )
 
-        return {**pos, "realised_pnl": pnl, "exit_price": exit_price, "exit_reason": reason}
+        return {**pos, "realised_pnl": total_pnl, "exit_price": exit_price, "exit_reason": reason}
 
     def _apply_partial_tp(
         self,

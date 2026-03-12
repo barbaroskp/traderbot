@@ -204,6 +204,30 @@ class Settings(BaseSettings):
     time_decay_start_pct: float = 0.6
     time_decay_sl_reduction_pct: float = 0.3
 
+    # ── Tiered TP (Kademeli Kar Al) ─────────────────────────
+    # 3 kademeli cikis: hizli kar al + kazanani kostur + trailing
+    use_tiered_tp: bool = True               # ANA SWITCH: kademeli TP aktif
+    tiered_tp1_fraction: float = 0.40        # %40 pozisyon: ilk hedefte kapat
+    tiered_tp1_ratio: float = 0.50           # TP1 = toplam TP'nin %50'si (hizli kar)
+    tiered_tp2_fraction: float = 0.30        # %30 pozisyon: ikinci hedefte kapat
+    tiered_tp2_ratio: float = 1.00           # TP2 = toplam TP'nin %100'u (tam hedef)
+    tiered_tp3_trailing: bool = True          # %30 kalan: trailing stop ile takip
+    tiered_tp3_trail_bps: float = 40.0       # trailing mesafe: 40bps (ATR'ye de uyarlanir)
+    tiered_tp3_activation_bps: float = 100.0 # trailing aktif: en az 100bps karda olunca
+    tiered_move_sl_after_tp1: bool = True    # TP1 sonrasi SL'yi entry'ye cek (risksiz)
+
+    # ── SL Randomization (Stop Hunting Korumasi) ────────────
+    use_sl_randomization: bool = True         # SL'ye rastgele offset ekle
+    sl_random_min_bps: float = 3.0           # minimum offset: 3bps
+    sl_random_max_bps: float = 12.0          # maximum offset: 12bps (SL'yi biraz genislet)
+
+    # ── Daily Loss Circuit Breaker ──────────────────────────
+    use_daily_loss_limit: bool = True
+    daily_loss_limit_pct: float = 0.04       # gunluk -%4 kayip → yeni islem durdur
+    daily_loss_reduce_pct: float = 0.02      # gunluk -%2 kayip → pozisyon boyutu %50 kucult
+    daily_loss_kill_pct: float = 0.06        # gunluk -%6 kayip → tum pozisyonlari kapat + 4 saat bekle
+    daily_loss_cooldown_minutes: int = 240   # kill sonrasi bekleme suresi (4 saat)
+
     # ── Kelly Criterion Sizing (outputs MARGIN fraction) ──────
     use_kelly_sizing: bool = True
     kelly_fraction: float = 0.3  # quarter-Kelly: more conservative (was 0.5 half-Kelly)
@@ -231,13 +255,13 @@ class Settings(BaseSettings):
     min_tp_bps: float = 100.0             # minimum TP floor raised (was 60)
     # TP must be at least this many bps above round-trip fees so that at TP we have net profit
     min_tp_net_bps: float = 25.0           # need 25bps net after fees (was 10)
-    use_trailing_stop: bool = False          # KAPALI: kazananlari %40'ta kesiyor, TP'ye ulasamiyor
-    trailing_activation_pct: float = 0.75   # acilirsa bile %75 TP'de aktif olsun
+    use_trailing_stop: bool = False          # KAPALI: tiered_tp3 bunu yapiyor artik
+    trailing_activation_pct: float = 0.75
     trailing_distance_pct: float = 0.3
-    use_breakeven_stop: bool = False         # KAPALI: kucuk kari kilitleyip buyuk TP'yi engelliyor
+    use_breakeven_stop: bool = False         # KAPALI: tiered_move_sl_after_tp1 bunu yapiyor
     breakeven_activation_pct: float = 0.7
     breakeven_buffer_bps: float = 10.0
-    use_partial_tp: bool = False             # KAPALI: yari kari erken aliyor, kalan BE'de cikiyor
+    use_partial_tp: bool = False             # KAPALI: tiered_tp sistemi bunu degistirdi
     partial_tp_fraction: float = 0.3
     partial_tp_trigger_pct: float = 0.8
 
