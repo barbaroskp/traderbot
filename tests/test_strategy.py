@@ -363,6 +363,7 @@ class TestVWAPVote:
 class TestStochRSIVote:
     def test_stoch_rsi_oversold_adds_long_vote(self, strategy_cfg, db) -> None:
         strategy_cfg.require_momentum_confirmation = False
+        strategy_cfg.active_indicators = "ema_zscore,rsi,macd,bollinger,adx,orderbook,obv,vwap,stoch_rsi"
         strat = Strategy(strategy_cfg, db)
         snap = _make_snap(
             "BTC-USDT", z=-35, rsi=25,
@@ -379,6 +380,7 @@ class TestStochRSIVote:
 
     def test_stoch_rsi_overbought_adds_short_vote(self, strategy_cfg, db) -> None:
         strategy_cfg.require_momentum_confirmation = False
+        strategy_cfg.active_indicators = "ema_zscore,rsi,macd,bollinger,adx,orderbook,obv,vwap,stoch_rsi"
         strat = Strategy(strategy_cfg, db)
         snap = _make_snap(
             "BTC-USDT", z=35, rsi=75,

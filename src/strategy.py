@@ -1052,6 +1052,11 @@ class Strategy:
                 reason=f"composite sentiment {sentiment:+.1f} (F&G={indicators.fear_greed_index:.0f})",
             ))
 
+        # ── Filter to active indicators only ──────────────────
+        active_set = set(cfg.active_indicators.split(","))
+        if active_set:
+            votes = [v for v in votes if v.name in active_set]
+
         return votes
 
     def _check_momentum(self, indicators: Indicators, side: str) -> bool:

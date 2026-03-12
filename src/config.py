@@ -121,6 +121,11 @@ class Settings(BaseSettings):
     use_funding_filter: bool = False  # KAPALI: funding rate filtresi cok sinyal engelliyor
     funding_rate_threshold: float = 0.0003    # more sensitive to funding extremes
     funding_contra_bonus: float = 8.0         # bigger bonus for contrarian funding trades
+    # ── Indicator Simplification ─────────────────────────────
+    # 22 indikator var ama ~7 bagimsiz bilgi kaynagi. Sadece bagimsiz olanlari kullan.
+    # Aktif olmayanlar hesaplanir ama oy sayisina/agirliga katilmaz.
+    active_indicators: str = "ema_zscore,rsi,macd,bollinger,adx,orderbook,obv,vwap"
+
     # Weights for combined score (normalized to 0-100 at scoring time)
     weight_ema: float = 25.0
     weight_rsi: float = 25.0
