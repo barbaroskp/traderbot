@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     cooldown_minutes: int = 7              # agresif: firsatlari kacirma (10 hala uzun)
     max_open_positions: int = 7            # agresif: daha fazla cesitlilik ve firsat (5 az)
     max_z_score_bps: float = 300.0         # genis: breakout firsatlarini da yakala (150 cok daraldi)
+    min_notional_usdt: float = 5.0          # exchange minimum notional: 5$ altindaki orderlari gonderme
 
     # ── Multi-Indicator (RSI, MACD, Bollinger) ───────────────
     rsi_period: int = 14

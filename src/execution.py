@@ -188,6 +188,17 @@ class PaperExecution(ExecutionAdapter):
         if qty <= 0:
             return None
 
+        # ── Min qty + min notional pre-validation ────────────────
+        if contract:
+            min_qty = contract.get("min_qty", 0)
+            if min_qty and qty < min_qty:
+                log.debug("paper: qty below min_qty", extra={"symbol": signal.symbol, "qty": qty, "min_qty": min_qty})
+                return None
+        notional = qty * snap.mid_price
+        if notional < self.cfg.min_notional_usdt:
+            log.debug("paper: notional below minimum", extra={"symbol": signal.symbol, "notional": round(notional, 2), "min": self.cfg.min_notional_usdt})
+            return None
+
         # ── Simulate fill price with dynamic slippage ─────────────
         # Use the larger of: half the actual spread, or the configured assumption.
         # Wide-spread coins get realistic higher slippage; tight coins stay low.
@@ -930,6 +941,17 @@ class LiveExecution(ExecutionAdapter):
         step_size = contract.get("step_size", 0.001) if contract else 0.001
         qty = self._round_qty(qty, step_size)
         if qty <= 0:
+            return None
+
+        # ── Min qty + min notional pre-validation ────────────────
+        if contract:
+            min_qty = contract.get("min_qty", 0)
+            if min_qty and qty < min_qty:
+                log.warning("live: qty below min_qty, skipping", extra={"symbol": signal.symbol, "qty": qty, "min_qty": min_qty})
+                return None
+        notional = qty * snap.mid_price
+        if notional < self.cfg.min_notional_usdt:
+            log.warning("live: notional below minimum, skipping", extra={"symbol": signal.symbol, "notional": round(notional, 2), "min": self.cfg.min_notional_usdt})
             return None
 
         # Set leverage + margin mode (use override when high-conviction signal)
