@@ -240,13 +240,13 @@ class TestSessionAwareness:
         assert info["session"] == "eu_us_overlap"
         assert info["score_bonus"] > 0
 
-    def test_dead_zone_reduces_size(self, faz3_strategy) -> None:
-        """Dead zone should reduce position size multiplier."""
+    def test_dead_zone_full_size(self, faz3_strategy) -> None:
+        """Dead zone should keep full position size (no reduction)."""
         # 23:00 UTC = dead zone
         now = datetime(2024, 1, 1, 23, 0, tzinfo=timezone.utc)
         info = faz3_strategy._get_session_info(now)
         assert info["session"] == "dead_zone"
-        assert info["size_mult"] < 1.0
+        assert info["size_mult"] == 1.0
 
     def test_asian_session(self, faz3_strategy) -> None:
         """Asian session hours should be recognized."""

@@ -96,13 +96,13 @@ class TestPortfolioHeat:
     def test_moderate_heat_reduces(self, faz456_cfg, db) -> None:
         risk = RiskManager(faz456_cfg, db)
         risk._current_balance = 100.0
-        mult = risk.get_portfolio_heat_mult(45.0)  # 45% heat
+        mult = risk.get_portfolio_heat_mult(80.0)  # 80% heat > 75% reduce threshold
         assert mult == faz456_cfg.portfolio_heat_reduce_mult
 
     def test_max_heat_blocks(self, faz456_cfg, db) -> None:
         risk = RiskManager(faz456_cfg, db)
         risk._current_balance = 100.0
-        mult = risk.get_portfolio_heat_mult(65.0)  # 65% heat > 60% max
+        mult = risk.get_portfolio_heat_mult(95.0)  # 95% heat > 90% max
         assert mult == 0.0
 
     def test_disabled_returns_1(self, faz456_cfg, db) -> None:

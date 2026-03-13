@@ -151,39 +151,35 @@ class TestDailyLossCircuitBreaker:
         assert risk.can_open_new_trade() is True
         assert risk.get_daily_size_multiplier() == 1.0
 
-    def test_reduce_threshold_halves_size(self, tiered_cfg, tiered_db) -> None:
-        """After -2% daily loss, position sizes should be halved."""
+    def test_reduce_threshold_no_effect_when_disabled(self, tiered_cfg, tiered_db) -> None:
+        """Daily loss limit disabled: losses should NOT halve position sizes."""
         risk = RiskManager(tiered_cfg, tiered_db)
-        # Start balance = 20, -2% = -0.40
-        risk.record_trade_result(-0.50)  # > 2%
+        risk.record_trade_result(-0.50)
 
-        assert risk.daily_reduce_active is True
-        assert risk.get_daily_size_multiplier() == 0.5
-        assert risk.can_open_new_trade() is True  # still allows trading
+        assert risk.daily_reduce_active is False
+        assert risk.get_daily_size_multiplier() == 1.0
+        assert risk.can_open_new_trade() is True
 
-    def test_stop_threshold_blocks_new_trades(self, tiered_cfg, tiered_db) -> None:
-        """After -4% daily loss, no new trades should be allowed."""
+    def test_stop_threshold_no_effect_when_disabled(self, tiered_cfg, tiered_db) -> None:
+        """Daily loss limit disabled: losses should NOT block new trades."""
         risk = RiskManager(tiered_cfg, tiered_db)
-        # Start balance = 20, -4% = -0.80
         risk.record_trade_result(-0.90)
 
-        assert risk.daily_stop_active is True
-        assert risk.can_open_new_trade() is False
+        assert risk.daily_stop_active is False
+        assert risk.can_open_new_trade() is True
 
-    def test_kill_threshold_activates_cooldown(self, tiered_cfg, tiered_db) -> None:
-        """After -6% daily loss, kill switch should activate with cooldown."""
+    def test_kill_threshold_no_effect_when_disabled(self, tiered_cfg, tiered_db) -> None:
+        """Daily loss limit disabled: losses should NOT activate kill switch."""
         risk = RiskManager(tiered_cfg, tiered_db)
-        # Start balance = 20, -6% = -1.20
         risk.record_trade_result(-1.30)
 
-        assert risk.daily_kill_active is True
-        assert risk.can_open_new_trade() is False
+        assert risk.daily_kill_active is False
+        assert risk.can_open_new_trade() is True
 
     def test_daily_reset_clears_state(self, tiered_cfg, tiered_db) -> None:
         """New day should reset daily P&L tracking."""
         risk = RiskManager(tiered_cfg, tiered_db)
-        risk.record_trade_result(-0.90)  # Trigger stop
-        assert risk.daily_stop_active is True
+        risk.record_trade_result(-0.90)
 
         # Simulate day change
         risk._daily_date = "2020-01-01"

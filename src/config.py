@@ -217,7 +217,7 @@ class Settings(BaseSettings):
     adaptive_quality_min_trades: int = 10   # min 10 trade olana kadar default kullan
     adaptive_quality_base_score: float = 40.0   # baslangic min score
     adaptive_quality_win_adjust: float = -2.0   # win streak → daha agresif (score -2)
-    adaptive_quality_loss_adjust: float = 5.0   # loss streak → daha secici (score +5)
+    adaptive_quality_loss_adjust: float = 0.0   # loss streak'te esik yukseltme YOK — ayni kaliteyle devam
     adaptive_quality_max_score: float = 70.0    # max eşik (cok kisitlama)
     adaptive_quality_min_score: float = 25.0    # min esik (her zaman biraz filtre)
 
@@ -238,7 +238,7 @@ class Settings(BaseSettings):
     session_us_end: int = 22              # 22:00 UTC
     session_dead_zone_start: int = 22     # 22:00-00:00 UTC = dusuk likidite
     session_dead_zone_end: int = 0
-    session_dead_zone_size_mult: float = 0.5  # dead zone'da %50 boyut
+    session_dead_zone_size_mult: float = 1.0  # dead zone'da da tam boyut — pozisyon daraltma yok
     session_overlap_bonus_score: float = 5.0  # EU/US overlap bonus (13-16 UTC)
 
     # Smart Cooldown: kaybedilen pair'de daha uzun, kazanılan pair'de kisaltilmis
@@ -253,16 +253,16 @@ class Settings(BaseSettings):
     slippage_reject_threshold_bps: float = 30.0   # 30bps ustu → reject signal for this pair
 
     # ── Faz 4: Drawdown-Based Leverage Scaling ─────────────
-    use_drawdown_leverage_scaling: bool = True
-    drawdown_leverage_start_pct: float = 5.0     # drawdown %5'den sonra leverage azalt
-    drawdown_leverage_full_pct: float = 15.0     # drawdown %15'te minimum leverage'a in
-    drawdown_leverage_min_mult: float = 0.4      # minimum leverage multiplier (60% azaltma)
+    use_drawdown_leverage_scaling: bool = False   # KAPALI: kayiptan sonra leverage azaltma — mantik dogruysa tam boyutla devam
+    drawdown_leverage_start_pct: float = 5.0
+    drawdown_leverage_full_pct: float = 15.0
+    drawdown_leverage_min_mult: float = 0.4
 
     # ── Faz 4: Portfolio Heat Monitor ──────────────────────
     use_portfolio_heat: bool = True
-    portfolio_heat_max_pct: float = 60.0         # max portfolio risk: bakiyenin %60'i
-    portfolio_heat_reduce_at_pct: float = 40.0   # %40'ta yeni pozisyon buyukluklerini kucult
-    portfolio_heat_reduce_mult: float = 0.5      # pozisyon boyutu carpani (heat yuksekken)
+    portfolio_heat_max_pct: float = 90.0         # max portfolio risk: bakiyenin %90'i (genis)
+    portfolio_heat_reduce_at_pct: float = 75.0   # %75'te kucult (eskisi %40 cok erken daraliyordu)
+    portfolio_heat_reduce_mult: float = 0.75     # %75 boyut (eskisi %50 cok agresif azaltiyordu)
 
     # ── Faz 5: Order Flow Imbalance Signal ─────────────────
     weight_orderflow: float = 12.0
@@ -275,21 +275,21 @@ class Settings(BaseSettings):
     liquidity_sizing_depth_floor_usdt: float = 3000.0  # derinlik alt sinir
 
     # ── Faz 6: Rolling Sharpe Tracking ─────────────────────
-    use_rolling_sharpe: bool = True
-    rolling_sharpe_lookback: int = 50            # son 50 islem
-    rolling_sharpe_min_trades: int = 15          # minimum veri
-    rolling_sharpe_pause_threshold: float = -0.5 # Sharpe < -0.5 → yeni islem durdur
-    rolling_sharpe_reduce_threshold: float = 0.0 # Sharpe < 0 → pozisyon kucult
+    use_rolling_sharpe: bool = False             # KAPALI: Sharpe bazli pozisyon daraltma/durdurma yok
+    rolling_sharpe_lookback: int = 50
+    rolling_sharpe_min_trades: int = 15
+    rolling_sharpe_pause_threshold: float = -0.5
+    rolling_sharpe_reduce_threshold: float = 0.0
 
     # ── Faz 6: Strategy Decay Detection ────────────────────
-    use_decay_detection: bool = True
-    decay_lookback_recent: int = 20              # son 20 islem
-    decay_lookback_baseline: int = 100           # referans 100 islem
-    decay_min_trades: int = 30                   # minimum veri (recent + some baseline)
-    decay_winrate_drop_pct: float = 15.0         # win rate %15+ dustuyse decay
-    decay_pf_drop_pct: float = 30.0              # profit factor %30+ dustuyse decay
-    decay_action: str = "reduce"                 # "reduce" veya "pause"
-    decay_size_mult: float = 0.5                 # decay varken pozisyon buyuklugu carpani
+    use_decay_detection: bool = False             # KAPALI: strateji decay'de pozisyon daraltma yok
+    decay_lookback_recent: int = 20
+    decay_lookback_baseline: int = 100
+    decay_min_trades: int = 30
+    decay_winrate_drop_pct: float = 15.0
+    decay_pf_drop_pct: float = 30.0
+    decay_action: str = "reduce"
+    decay_size_mult: float = 0.5
 
     # ── Expectancy-Based Signal Scoring ──────────────────────
     use_expectancy_scoring: bool = True
@@ -349,11 +349,11 @@ class Settings(BaseSettings):
     sl_random_max_bps: float = 12.0          # maximum offset: 12bps (SL'yi biraz genislet)
 
     # ── Daily Loss Circuit Breaker ──────────────────────────
-    use_daily_loss_limit: bool = True
-    daily_loss_limit_pct: float = 0.04       # gunluk -%4 kayip → yeni islem durdur
-    daily_loss_reduce_pct: float = 0.02      # gunluk -%2 kayip → pozisyon boyutu %50 kucult
-    daily_loss_kill_pct: float = 0.06        # gunluk -%6 kayip → tum pozisyonlari kapat + 4 saat bekle
-    daily_loss_cooldown_minutes: int = 240   # kill sonrasi bekleme suresi (4 saat)
+    use_daily_loss_limit: bool = False        # KAPALI: gunluk kayip limiti yok — pozisyon daraltma/durdurma yapma
+    daily_loss_limit_pct: float = 0.04
+    daily_loss_reduce_pct: float = 0.02
+    daily_loss_kill_pct: float = 0.06
+    daily_loss_cooldown_minutes: int = 240
 
     # ── Kelly Criterion Sizing (outputs MARGIN fraction) ──────
     use_kelly_sizing: bool = True
