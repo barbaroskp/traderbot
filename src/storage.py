@@ -225,11 +225,6 @@ class Storage:
         # Positions: exit reason tracking (SL/TP/TIMEOUT/MOMENTUM_EXIT/ANTI_LIQUIDATION/TRAILING)
         if "exit_reason" not in pos_cols:
             conn.execute("ALTER TABLE positions ADD COLUMN exit_reason TEXT")
-        # Positions: tiered TP tracking
-        if "tp3_qty" not in pos_cols:
-            conn.execute("ALTER TABLE positions ADD COLUMN tp3_qty REAL DEFAULT 0")
-        if "tp2_filled" not in pos_cols:
-            conn.execute("ALTER TABLE positions ADD COLUMN tp2_filled INTEGER DEFAULT 0")
 
         # Orders: TP level
         if "tp_level" not in ord_cols:

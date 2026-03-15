@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import abc
 import asyncio
-import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -36,30 +35,22 @@ def _compute_tp_sl_bps(
     cfg: Settings, snap: SymbolSnapshot, entry_price: float,
     trade_type: str = "scalp",
 ) -> tuple[float, float]:
-    """Compute SL/TP bps (ATR-based when enabled).
+    """Compute SL/TP bps (ATR-based when enabled). Swing uses wider values.
     TP is floored so that after fees we have at least min_tp_net_bps net profit.
     """
-    base_sl = cfg.sl_bps
-    base_tp = cfg.tp_bps
+    is_swing = trade_type == "swing"
+    base_sl = cfg.swing_sl_bps if is_swing else cfg.sl_bps
+    base_tp = cfg.swing_tp_bps if is_swing else cfg.tp_bps
+    atr_sl_mult = cfg.swing_atr_sl_multiplier if is_swing else cfg.atr_sl_multiplier
+    atr_tp_mult = cfg.swing_atr_tp_multiplier if is_swing else cfg.atr_tp_multiplier
 
     if cfg.use_dynamic_tp_sl and snap.indicators.atr > 0 and entry_price > 0:
         atr_bps = (snap.indicators.atr / entry_price) * 10_000
-        sl_bps = max(atr_bps * cfg.atr_sl_multiplier, cfg.min_sl_bps)
-        tp_bps = max(atr_bps * cfg.atr_tp_multiplier, cfg.min_tp_bps)
+        sl_bps = max(atr_bps * atr_sl_mult, cfg.min_sl_bps)
+        tp_bps = max(atr_bps * atr_tp_mult, cfg.min_tp_bps)
     else:
         sl_bps = base_sl
         tp_bps = base_tp
-
-    # ── Volatility Regime Adaptation ──────────────────────────
-    # Adjust SL/TP based on current volatility regime
-    if cfg.use_vol_regime_sl_tp and snap.indicators.atr > 0 and entry_price > 0:
-        atr_bps_now = (snap.indicators.atr / entry_price) * 10_000
-        if atr_bps_now < cfg.vol_low_atr_bps:
-            sl_bps *= cfg.vol_low_sl_mult
-            tp_bps *= cfg.vol_low_tp_mult
-        elif atr_bps_now > cfg.vol_high_atr_bps:
-            sl_bps *= cfg.vol_high_sl_mult
-            tp_bps *= cfg.vol_high_tp_mult
 
     # Floor TP so that after round-trip fees we have at least min_tp_net_bps net profit
     round_trip_fee_bps = 2.0 * cfg.fee_rate_bps
@@ -185,17 +176,6 @@ class PaperExecution(ExecutionAdapter):
         if qty <= 0:
             return None
 
-        # ── Min qty + min notional pre-validation ────────────────
-        if contract:
-            min_qty = contract.get("min_qty", 0)
-            if min_qty and qty < min_qty:
-                log.debug("paper: qty below min_qty", extra={"symbol": signal.symbol, "qty": qty, "min_qty": min_qty})
-                return None
-        notional = qty * snap.mid_price
-        if notional < self.cfg.min_notional_usdt:
-            log.debug("paper: notional below minimum", extra={"symbol": signal.symbol, "notional": round(notional, 2), "min": self.cfg.min_notional_usdt})
-            return None
-
         # ── Simulate fill price with dynamic slippage ─────────────
         # Use the larger of: half the actual spread, or the configured assumption.
         # Wide-spread coins get realistic higher slippage; tight coins stay low.
@@ -269,62 +249,36 @@ class PaperExecution(ExecutionAdapter):
 
         # ── Compute SL / TP prices ──────────────────────────────
         sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, fill_price, getattr(signal, "trade_type", "scalp"))
-
-        # ── SL Randomization (stop hunting korumasi) ──────────
-        # SL'yi tam hesaplanan noktaya degil, biraz daha geriye koy
-        # Boylece diger botlarla ayni SL seviyesine dusmuyor
-        if self.cfg.use_sl_randomization:
-            sl_offset = random.uniform(self.cfg.sl_random_min_bps, self.cfg.sl_random_max_bps)
-            sl_bps += sl_offset  # SL'yi biraz genislet (daha guvenli)
-
         if signal.side == "LONG":
             sl_price = fill_price * (1 - sl_bps / 10_000)
+            tp_price = fill_price * (1 + tp_bps / 10_000)
         else:
             sl_price = fill_price * (1 + sl_bps / 10_000)
+            tp_price = fill_price * (1 - tp_bps / 10_000)
 
-        # ── Tiered TP (3 kademeli cikis) ──────────────────────
+        # Partial TP
         tp1_oid = ""
         tp1_price = 0.0
         tp1_qty = 0.0
-        tp2_oid = ""
-        tp2_price = 0.0
-        tp2_qty = 0.0
-        tp3_qty = 0.0  # trailing stop ile yonetilecek kisim
-
-        if self.cfg.use_tiered_tp:
-            # TP1: hizli kar al (%40 pozisyon, %50 TP hedefinde)
-            tp1_bps = tp_bps * self.cfg.tiered_tp1_ratio
-            tp1_qty = qty * self.cfg.tiered_tp1_fraction
+        tp2_qty = qty
+        if self.cfg.use_partial_tp and 0 < self.cfg.partial_tp_fraction < 1:
+            tp1_qty = qty * self.cfg.partial_tp_fraction
+            tp2_qty = qty - tp1_qty
+            tp1_bps = tp_bps * self.cfg.partial_tp_trigger_pct
             if signal.side == "LONG":
                 tp1_price = fill_price * (1 + tp1_bps / 10_000)
             else:
                 tp1_price = fill_price * (1 - tp1_bps / 10_000)
-            tp1_oid = generate_client_order_id()
-
-            # TP2: tam hedef (%30 pozisyon, %100 TP hedefinde)
-            tp2_bps = tp_bps * self.cfg.tiered_tp2_ratio
-            tp2_qty = qty * self.cfg.tiered_tp2_fraction
-            if signal.side == "LONG":
-                tp2_price = fill_price * (1 + tp2_bps / 10_000)
+            if tp1_qty > 0 and tp2_qty > 0:
+                tp1_oid = generate_client_order_id()
             else:
-                tp2_price = fill_price * (1 - tp2_bps / 10_000)
-            tp2_oid = generate_client_order_id()
-
-            # TP3: kalan %30 → trailing stop ile yonetilecek (order yok, check_exits halleder)
-            tp3_qty = qty - tp1_qty - tp2_qty
-        else:
-            # Eski sistem: tek TP
-            if signal.side == "LONG":
-                tp2_price = fill_price * (1 + tp_bps / 10_000)
-            else:
-                tp2_price = fill_price * (1 - tp_bps / 10_000)
-            tp2_qty = qty
-            tp2_oid = generate_client_order_id()
+                tp1_qty = 0.0
+                tp2_qty = qty
 
         sl_oid = generate_client_order_id()
+        tp_oid = generate_client_order_id()
 
         # ── Persist SL order ────────────────────────────────────
-        exit_side = "SHORT" if signal.side == "LONG" else "LONG"
         self.db.insert(
             "orders",
             {
@@ -332,7 +286,7 @@ class PaperExecution(ExecutionAdapter):
                 "exchange_order_id": f"paper_{sl_oid}",
                 "ts": now,
                 "symbol": signal.symbol,
-                "side": exit_side,
+                "side": "SHORT" if signal.side == "LONG" else "LONG",
                 "order_type": "STOP_MARKET",
                 "price": sl_price,
                 "qty": qty,
@@ -355,7 +309,7 @@ class PaperExecution(ExecutionAdapter):
                     "exchange_order_id": f"paper_{tp1_oid}",
                     "ts": now,
                     "symbol": signal.symbol,
-                    "side": exit_side,
+                    "side": "SHORT" if signal.side == "LONG" else "LONG",
                     "order_type": "TAKE_PROFIT",
                     "price": tp1_price,
                     "qty": tp1_qty,
@@ -370,28 +324,27 @@ class PaperExecution(ExecutionAdapter):
                 },
             )
 
-        if tp2_oid:
-            self.db.insert(
-                "orders",
-                {
-                    "client_order_id": tp2_oid,
-                    "exchange_order_id": f"paper_{tp2_oid}",
-                    "ts": now,
-                    "symbol": signal.symbol,
-                    "side": exit_side,
-                    "order_type": "TAKE_PROFIT",
-                    "price": tp2_price,
-                    "qty": tp2_qty,
-                    "status": "PENDING",
-                    "filled_qty": 0,
-                    "avg_fill_price": 0,
-                    "is_paper": 1,
-                    "parent_order_id": client_oid,
-                    "reduce_only": 1,
-                    "tp_level": 2,
-                    "updated_at": now,
-                },
-            )
+        self.db.insert(
+            "orders",
+            {
+                "client_order_id": tp_oid,
+                "exchange_order_id": f"paper_{tp_oid}",
+                "ts": now,
+                "symbol": signal.symbol,
+                "side": "SHORT" if signal.side == "LONG" else "LONG",
+                "order_type": "TAKE_PROFIT",
+                "price": tp_price,
+                "qty": tp2_qty,
+                "status": "PENDING",
+                "filled_qty": 0,
+                "avg_fill_price": 0,
+                "is_paper": 1,
+                "parent_order_id": client_oid,
+                "reduce_only": 1,
+                "tp_level": 2 if tp1_oid else 1,
+                "updated_at": now,
+            },
+        )
 
         # ── Open position ──────────────────────────────────────
         self.db.insert(
@@ -408,21 +361,22 @@ class PaperExecution(ExecutionAdapter):
                 "realised_pnl": 0,
                 "sl_order_id": sl_oid,
                 "tp1_order_id": tp1_oid,
-                "tp_order_id": tp2_oid,
-                "tp3_qty": tp3_qty,
+                "tp_order_id": tp_oid,
                 "sl_bps": sl_bps,
                 "tp_bps": tp_bps,
                 "leverage": leverage_override or self.cfg.leverage,
                 "breakeven_triggered": 0,
                 "partial_tp_filled": 0,
-                "tp2_filled": 0,
                 "highest_price": fill_price,
                 "lowest_price": fill_price,
                 "opened_at": now,
                 "status": "OPEN",
                 "is_paper": 1,
-                "trade_type": "scalp",
-                "max_hold_minutes": self.cfg.max_hold_minutes,
+                "trade_type": getattr(signal, "trade_type", "scalp"),
+                "max_hold_minutes": (
+                    self.cfg.swing_max_hold_minutes if getattr(signal, "trade_type", "scalp") == "swing"
+                    else self.cfg.max_hold_minutes
+                ),
             },
         )
 
@@ -435,8 +389,7 @@ class PaperExecution(ExecutionAdapter):
                 "fill_price": fill_price,
                 "notional": round(notional, 2),
                 "sl": round(sl_price, 6),
-                "tp2": round(tp2_price, 6),
-                "tiered": self.cfg.use_tiered_tp,
+                "tp": round(tp_price, 6),
             },
         )
 
@@ -519,9 +472,9 @@ class PaperExecution(ExecutionAdapter):
 
             exit_reason = ""
 
-            # ── Partial TP1 check (tiered TP) ─────────────────────
+            # ── Partial TP check ─────────────────────────────────
             if (
-                self.cfg.use_tiered_tp
+                self.cfg.use_partial_tp
                 and not pos.get("partial_tp_filled", 0)
                 and pos.get("tp1_order_id")
             ):
@@ -541,38 +494,44 @@ class PaperExecution(ExecutionAdapter):
                         pos["remaining_qty"] = remaining
                         pos["qty"] = remaining
 
-                        # Move SL to breakeven after TP1
-                        if self.cfg.use_tiered_tp and self.cfg.tiered_move_sl_after_tp1:
-                            buf = getattr(self.cfg, "profit_lock_buffer_bps", 5.0)
+                        # Move SL to breakeven after partial TP
+                        if self.cfg.use_breakeven_stop:
                             if side == "LONG":
-                                be_price = entry * (1 + buf / 10_000)
+                                be_price = entry * (1 + self.cfg.breakeven_buffer_bps / 10_000)
                             else:
-                                be_price = entry * (1 - buf / 10_000)
+                                be_price = entry * (1 - self.cfg.breakeven_buffer_bps / 10_000)
                             self._update_sl_order_price(pos, side, be_price)
                             self.db.execute(
                                 "UPDATE positions SET breakeven_triggered=1 WHERE id=?",
                                 (pos["id"],),
                             )
 
-            # ── Profit Lock: SL to breakeven when reaching X% of TP ──
-            if self.cfg.use_profit_lock and not pos.get("breakeven_triggered", 0):
-                if profit_bps >= tp_bps * self.cfg.profit_lock_activation_pct:
-                    buf = self.cfg.profit_lock_buffer_bps
+            # ── Breakeven check ─────────────────────────────────
+            if self.cfg.use_breakeven_stop and not pos.get("breakeven_triggered", 0):
+                if profit_bps >= tp_bps * self.cfg.breakeven_activation_pct:
                     if side == "LONG":
-                        lock_price = entry * (1 + buf / 10_000)
+                        be_price = entry * (1 + self.cfg.breakeven_buffer_bps / 10_000)
                     else:
-                        lock_price = entry * (1 - buf / 10_000)
-                    self._update_sl_order_price(pos, side, lock_price)
+                        be_price = entry * (1 - self.cfg.breakeven_buffer_bps / 10_000)
+                    self._update_sl_order_price(pos, side, be_price)
                     self.db.execute(
                         "UPDATE positions SET breakeven_triggered=1 WHERE id=?",
                         (pos["id"],),
                     )
-                    log.info("paper: profit lock activated", symbol=symbol,
-                             profit_bps=round(profit_bps, 1), lock_price=round(lock_price, 2))
 
-            # ── Time-decay SL tightening ─────────────────────────
+            # ── Trailing stop update ────────────────────────────
+            if self.cfg.use_trailing_stop and profit_bps >= tp_bps * self.cfg.trailing_activation_pct:
+                trail_bps = sl_bps * self.cfg.trailing_distance_pct
+                if side == "LONG":
+                    new_sl = mark * (1 - trail_bps / 10_000)
+                else:
+                    new_sl = mark * (1 + trail_bps / 10_000)
+                self._update_sl_order_price(pos, side, new_sl)
+
+            # ── NEW: Time-decay SL tightening ────────────────────
             pos_max_hold = int(pos.get("max_hold_minutes") or 0) or (
-                self.cfg.max_hold_minutes
+                self.cfg.swing_max_hold_minutes if pos.get("trade_type") == "swing"
+                else self.cfg.max_hold_minutes
             )
             if self.cfg.use_time_decay_sl and not exit_reason:
                 opened = datetime.fromisoformat(pos["opened_at"])
@@ -581,39 +540,30 @@ class PaperExecution(ExecutionAdapter):
                 elapsed_min = (now - opened).total_seconds() / 60
                 decay_start = pos_max_hold * self.cfg.time_decay_start_pct
                 if elapsed_min > decay_start and profit_bps < 0:
+                    # Progressively tighten SL as position ages while in loss
                     decay_progress = min(1.0, (elapsed_min - decay_start) / (pos_max_hold - decay_start))
                     reduction = sl_bps * self.cfg.time_decay_sl_reduction_pct * decay_progress
-                    tightened_sl_bps = max(sl_bps * 0.3, sl_bps - reduction)
+                    tightened_sl_bps = max(sl_bps * 0.3, sl_bps - reduction)  # never less than 30% of original
                     if side == "LONG":
                         new_sl = entry * (1 - tightened_sl_bps / 10_000)
                     else:
                         new_sl = entry * (1 + tightened_sl_bps / 10_000)
                     self._update_sl_order_price(pos, side, new_sl)
 
-            # ── Momentum reversal exit (with safety guards) ──────
+            # ── NEW: Momentum reversal exit ──────────────────────
             if self.cfg.use_momentum_exit and not exit_reason and profit_bps < 0:
-                # Guard 1: minimum loss threshold — don't exit on tiny dips
-                loss_deep_enough = abs(profit_bps) >= self.cfg.momentum_exit_min_loss_bps
-                # Guard 2: minimum hold time — avoid noise exits
-                opened_me = datetime.fromisoformat(pos["opened_at"])
-                if opened_me.tzinfo is None:
-                    opened_me = opened_me.replace(tzinfo=timezone.utc)
-                elapsed_me = (now - opened_me).total_seconds() / 60
-                min_hold = pos_max_hold * self.cfg.momentum_exit_min_hold_pct
-                held_long_enough = elapsed_me >= min_hold
-
-                if loss_deep_enough and held_long_enough:
-                    try:
-                        snap = await self.market.snapshot_symbol(symbol)
-                        if snap and snap.indicators.valid:
-                            hist = snap.indicators.macd_histogram
-                            prev = snap.indicators.macd_histogram_prev
-                            if side == "LONG" and hist < 0 and prev >= 0:
-                                exit_reason = "MOMENTUM_EXIT"
-                            elif side == "SHORT" and hist > 0 and prev <= 0:
-                                exit_reason = "MOMENTUM_EXIT"
-                    except Exception:
-                        pass
+                try:
+                    snap = await self.market.snapshot_symbol(symbol)
+                    if snap and snap.indicators.valid:
+                        hist = snap.indicators.macd_histogram
+                        prev = snap.indicators.macd_histogram_prev
+                        # MACD crossed zero against position direction while in loss
+                        if side == "LONG" and hist < 0 and prev >= 0:
+                            exit_reason = "MOMENTUM_EXIT"
+                        elif side == "SHORT" and hist > 0 and prev <= 0:
+                            exit_reason = "MOMENTUM_EXIT"
+                except Exception:
+                    pass  # don't block exit check on indicator fetch failure
 
             # ── SL check ────────────────────────────────────────
             sl_order = self.db.fetch_one(
@@ -627,72 +577,18 @@ class PaperExecution(ExecutionAdapter):
                 elif side == "SHORT" and mark >= sl_price:
                     exit_reason = "SL"
 
-            # ── TP2 check (tiered: partial close of 30% at full TP target) ──
-            if not exit_reason and pos.get("tp_order_id"):
-                tp2_order = self.db.fetch_one(
+            # ── TP check ────────────────────────────────────────
+            if not exit_reason:
+                tp_order = self.db.fetch_one(
                     "SELECT * FROM orders WHERE client_order_id=? AND status='PENDING'",
                     (pos.get("tp_order_id", ""),),
                 )
-                if tp2_order:
-                    tp2_price = tp2_order["price"]
-                    hit_tp2 = (side == "LONG" and mark >= tp2_price) or (
-                        side == "SHORT" and mark <= tp2_price
-                    )
-                    if hit_tp2:
-                        tp3_remaining = float(pos.get("tp3_qty", 0))
-                        if tp3_remaining > 0 and self.cfg.use_tiered_tp:
-                            # Tiered mode: TP2 is partial, TP3 remains for trailing
-                            remaining = self._apply_partial_tp(
-                                pos, mark, tp2_order["qty"], tp2_order["client_order_id"]
-                            )
-                            qty = remaining
-                            pos["remaining_qty"] = remaining
-                            pos["qty"] = remaining
-                            self.db.execute(
-                                "UPDATE positions SET tp2_filled=1 WHERE id=?",
-                                (pos["id"],),
-                            )
-                            # Move SL to breakeven if not already
-                            if not pos.get("breakeven_triggered", 0):
-                                if side == "LONG":
-                                    be_price = entry * (1 + self.cfg.breakeven_buffer_bps / 10_000)
-                                else:
-                                    be_price = entry * (1 - self.cfg.breakeven_buffer_bps / 10_000)
-                                self._update_sl_order_price(pos, side, be_price)
-                                self.db.execute(
-                                    "UPDATE positions SET breakeven_triggered=1 WHERE id=?",
-                                    (pos["id"],),
-                                )
-                        else:
-                            # Non-tiered: TP2 is full close
-                            exit_reason = "TP"
-
-            # ── TP3 trailing stop check (remaining qty after TP1+TP2) ──
-            if (
-                not exit_reason
-                and self.cfg.use_tiered_tp
-                and self.cfg.tiered_tp3_trailing
-                and pos.get("tp2_filled", 0)
-                and float(pos.get("tp3_qty", 0)) > 0
-                and qty > 0
-            ):
-                activation_bps = self.cfg.tiered_tp3_activation_bps
-                trail_bps = self.cfg.tiered_tp3_trail_bps
-                if profit_bps >= activation_bps:
-                    # Trailing stop for TP3: track from highest/lowest
-                    if side == "LONG":
-                        trail_sl = highest * (1 - trail_bps / 10_000)
-                        if mark <= trail_sl:
-                            exit_reason = "TP3_TRAIL"
-                        else:
-                            # Tighten SL to trailing level
-                            self._update_sl_order_price(pos, side, trail_sl)
-                    else:
-                        trail_sl = lowest * (1 + trail_bps / 10_000)
-                        if mark >= trail_sl:
-                            exit_reason = "TP3_TRAIL"
-                        else:
-                            self._update_sl_order_price(pos, side, trail_sl)
+                if tp_order:
+                    tp_price = tp_order["price"]
+                    if side == "LONG" and mark >= tp_price:
+                        exit_reason = "TP"
+                    elif side == "SHORT" and mark <= tp_price:
+                        exit_reason = "TP"
 
             # ── Timeout check ───────────────────────────────────
             if not exit_reason:
@@ -713,11 +609,10 @@ class PaperExecution(ExecutionAdapter):
     async def _close_position(
         self, pos: dict[str, Any], exit_price: float, reason: str
     ) -> dict[str, Any]:
-        """Close a paper position (remaining qty after any partial TPs)."""
+        """Close a paper position."""
         now = datetime.now(timezone.utc).isoformat()
         entry = pos["entry_price"]
-        # Use remaining_qty (after partial TP fills), not original qty
-        qty = float(pos.get("remaining_qty", pos["qty"]))
+        qty = pos["qty"]
         side = pos["side"]
 
         if side == "LONG":
@@ -725,19 +620,15 @@ class PaperExecution(ExecutionAdapter):
         else:
             pnl = (entry - exit_price) * qty
 
-        # Fees: entry (on remaining notional) + exit
+        # Fees: entry (on notional at open) + exit (on notional at close)
         entry_fee = entry * qty * (self.cfg.fee_rate_bps / 10_000)
         exit_fee = exit_price * qty * (self.cfg.fee_rate_bps / 10_000)
         pnl -= entry_fee + exit_fee
 
-        # Add already-realized PnL from partial TP fills
-        prior_pnl = float(pos.get("realised_pnl", 0))
-        total_pnl = prior_pnl + pnl
-
         # Update position (store exit_reason for analytics)
         self.db.execute(
             "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=?, exit_reason=? WHERE id=?",
-            (total_pnl, now, reason, pos["id"]),
+            (pnl, now, reason, pos["id"]),
         )
 
         # Mark SL/TP orders as cancelled (the one that didn't trigger)
@@ -758,13 +649,12 @@ class PaperExecution(ExecutionAdapter):
                 "reason": reason,
                 "entry": entry,
                 "exit": exit_price,
-                "pnl": round(total_pnl, 4),
-                "remaining_qty": qty,
-                "prior_partial_pnl": round(prior_pnl, 4),
+                "pnl": round(pnl, 4),
+                "qty": qty,
             },
         )
 
-        return {**pos, "realised_pnl": total_pnl, "exit_price": exit_price, "exit_reason": reason}
+        return {**pos, "realised_pnl": pnl, "exit_price": exit_price, "exit_reason": reason}
 
     def _apply_partial_tp(
         self,
@@ -913,17 +803,6 @@ class LiveExecution(ExecutionAdapter):
         step_size = contract.get("step_size", 0.001) if contract else 0.001
         qty = self._round_qty(qty, step_size)
         if qty <= 0:
-            return None
-
-        # ── Min qty + min notional pre-validation ────────────────
-        if contract:
-            min_qty = contract.get("min_qty", 0)
-            if min_qty and qty < min_qty:
-                log.warning("live: qty below min_qty, skipping", extra={"symbol": signal.symbol, "qty": qty, "min_qty": min_qty})
-                return None
-        notional = qty * snap.mid_price
-        if notional < self.cfg.min_notional_usdt:
-            log.warning("live: notional below minimum, skipping", extra={"symbol": signal.symbol, "notional": round(notional, 2), "min": self.cfg.min_notional_usdt})
             return None
 
         # Set leverage + margin mode (use override when high-conviction signal)
@@ -1112,54 +991,33 @@ class LiveExecution(ExecutionAdapter):
         notional = avg_price * filled_qty
         close_side = "SELL" if signal.side == "LONG" else "BUY"
 
-        sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, avg_price)
-
-        # SL Randomization (stop hunting koruması)
-        if self.cfg.use_sl_randomization:
-            sl_offset = random.uniform(self.cfg.sl_random_min_bps, self.cfg.sl_random_max_bps)
-            sl_bps += sl_offset
-
+        sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, avg_price, getattr(signal, "trade_type", "scalp"))
         if signal.side == "LONG":
             sl_price = avg_price * (1 - sl_bps / 10_000)
+            tp_price = avg_price * (1 + tp_bps / 10_000)
         else:
             sl_price = avg_price * (1 + sl_bps / 10_000)
+            tp_price = avg_price * (1 - tp_bps / 10_000)
 
-        # Tiered TP computation
         sl_oid = generate_client_order_id()
+        tp_oid = generate_client_order_id()
         tp1_oid = ""
         tp1_price = 0.0
         tp1_qty = 0.0
-        tp2_oid = generate_client_order_id()
-        tp2_price = 0.0
         tp2_qty = filled_qty
-        tp3_qty = 0.0
-
-        if self.cfg.use_tiered_tp:
-            # TP1: %40 qty at %50 of TP target
-            tp1_bps = tp_bps * self.cfg.tiered_tp1_ratio
-            tp1_qty = filled_qty * self.cfg.tiered_tp1_fraction
+        if self.cfg.use_partial_tp and 0 < self.cfg.partial_tp_fraction < 1:
+            tp1_qty = filled_qty * self.cfg.partial_tp_fraction
+            tp2_qty = filled_qty - tp1_qty
+            tp1_bps = tp_bps * self.cfg.partial_tp_trigger_pct
             if signal.side == "LONG":
                 tp1_price = avg_price * (1 + tp1_bps / 10_000)
             else:
                 tp1_price = avg_price * (1 - tp1_bps / 10_000)
-            tp1_oid = generate_client_order_id()
-
-            # TP2: %30 qty at %100 of TP target
-            tp2_bps = tp_bps * self.cfg.tiered_tp2_ratio
-            tp2_qty = filled_qty * self.cfg.tiered_tp2_fraction
-            if signal.side == "LONG":
-                tp2_price = avg_price * (1 + tp2_bps / 10_000)
+            if tp1_qty > 0 and tp2_qty > 0:
+                tp1_oid = generate_client_order_id()
             else:
-                tp2_price = avg_price * (1 - tp2_bps / 10_000)
-
-            # TP3: remaining for trailing
-            tp3_qty = filled_qty - tp1_qty - tp2_qty
-        else:
-            # Single TP
-            if signal.side == "LONG":
-                tp2_price = avg_price * (1 + tp_bps / 10_000)
-            else:
-                tp2_price = avg_price * (1 - tp_bps / 10_000)
+                tp1_qty = 0.0
+                tp2_qty = filled_qty
 
         # SL (stop-market) – with verification loop + fallback market close
         close_position_side = signal.side  # same position side for closing
@@ -1235,7 +1093,7 @@ class LiveExecution(ExecutionAdapter):
             except BingXClientError as exc:
                 log.error("live: TP1 placement failed", extra={"error": str(exc)})
 
-        # TP2 – take-profit market
+        # TP2 (final) – take-profit market
         try:
             await self.client.place_order(
                 symbol=signal.symbol,
@@ -1243,11 +1101,11 @@ class LiveExecution(ExecutionAdapter):
                 position_side=close_position_side,
                 order_type="TAKE_PROFIT_MARKET",
                 quantity=tp2_qty,
-                stop_price=tp2_price,
-                client_order_id=tp2_oid,
+                stop_price=tp_price,
+                client_order_id=tp_oid,
             )
         except BingXClientError as exc:
-            log.error("live: TP2 placement failed", extra={"error": str(exc)})
+            log.error("live: TP placement failed", extra={"error": str(exc)})
 
         # ── Persist SL/TP orders ───────────────────────────────
         self.db.insert(
@@ -1298,13 +1156,13 @@ class LiveExecution(ExecutionAdapter):
         self.db.insert(
             "orders",
             {
-                "client_order_id": tp2_oid,
+                "client_order_id": tp_oid,
                 "exchange_order_id": "",
                 "ts": now,
                 "symbol": signal.symbol,
                 "side": "SHORT" if signal.side == "LONG" else "LONG",
                 "order_type": "TAKE_PROFIT_MARKET",
-                "price": tp2_price,
+                "price": tp_price,
                 "qty": tp2_qty,
                 "status": "PENDING",
                 "filled_qty": 0,
@@ -1328,8 +1186,7 @@ class LiveExecution(ExecutionAdapter):
                 "notional": notional,
                 "sl_order_id": sl_oid,
                 "tp1_order_id": tp1_oid,
-                "tp_order_id": tp2_oid,
-                "tp3_qty": tp3_qty,
+                "tp_order_id": tp_oid,
                 "sl_bps": sl_bps,
                 "tp_bps": tp_bps,
                 "original_qty": filled_qty,
@@ -1337,14 +1194,16 @@ class LiveExecution(ExecutionAdapter):
                 "leverage": leverage,
                 "breakeven_triggered": 0,
                 "partial_tp_filled": 0,
-                "tp2_filled": 0,
                 "highest_price": avg_price,
                 "lowest_price": avg_price,
                 "opened_at": now,
                 "status": "OPEN",
                 "is_paper": 0,
-                "trade_type": "scalp",
-                "max_hold_minutes": self.cfg.max_hold_minutes,
+                "trade_type": getattr(signal, "trade_type", "scalp"),
+                "max_hold_minutes": (
+                    self.cfg.swing_max_hold_minutes if getattr(signal, "trade_type", "scalp") == "swing"
+                    else self.cfg.max_hold_minutes
+                ),
             },
         )
 
@@ -1514,25 +1373,32 @@ class LiveExecution(ExecutionAdapter):
                 except BingXClientError as exc:
                     log.warning("live: tp1 status check failed", extra={"error": str(exc)})
 
-            # ── Profit Lock: SL to breakeven when reaching X% of TP ──
-            if self.cfg.use_profit_lock and not pos.get("breakeven_triggered", 0):
-                if profit_bps >= tp_bps * self.cfg.profit_lock_activation_pct:
-                    buf = self.cfg.profit_lock_buffer_bps
+            # Breakeven update
+            if self.cfg.use_breakeven_stop and not pos.get("breakeven_triggered", 0):
+                if profit_bps >= tp_bps * self.cfg.breakeven_activation_pct:
                     if side == "LONG":
-                        lock_price = entry * (1 + buf / 10_000)
+                        be_price = entry * (1 + self.cfg.breakeven_buffer_bps / 10_000)
                     else:
-                        lock_price = entry * (1 - buf / 10_000)
-                    await self._update_live_sl(pos, side, exch_qty, lock_price)
+                        be_price = entry * (1 - self.cfg.breakeven_buffer_bps / 10_000)
+                    await self._update_live_sl(pos, side, exch_qty, be_price)
                     self.db.execute(
                         "UPDATE positions SET breakeven_triggered=1 WHERE id=?",
                         (pos["id"],),
                     )
-                    log.info("live: profit lock activated", symbol=symbol,
-                             profit_bps=round(profit_bps, 1), lock_price=round(lock_price, 2))
+
+            # Trailing stop update
+            if self.cfg.use_trailing_stop and profit_bps >= tp_bps * self.cfg.trailing_activation_pct:
+                trail_bps = sl_bps * self.cfg.trailing_distance_pct
+                if side == "LONG":
+                    new_sl = mark * (1 - trail_bps / 10_000)
+                else:
+                    new_sl = mark * (1 + trail_bps / 10_000)
+                await self._update_live_sl(pos, side, exch_qty, new_sl)
 
             # Time-decay SL tightening (live)
             live_max_hold = int(pos.get("max_hold_minutes") or 0) or (
-                self.cfg.max_hold_minutes
+                self.cfg.swing_max_hold_minutes if pos.get("trade_type") == "swing"
+                else self.cfg.max_hold_minutes
             )
             if self.cfg.use_time_decay_sl:
                 opened_td = datetime.fromisoformat(pos["opened_at"])
@@ -1550,29 +1416,20 @@ class LiveExecution(ExecutionAdapter):
                         new_sl = entry * (1 + tightened_sl_bps / 10_000)
                     await self._update_live_sl(pos, side, exch_qty, new_sl)
 
-            # Momentum reversal exit (live, with safety guards)
+            # Momentum reversal exit (live)
             should_momentum_exit = False
             if self.cfg.use_momentum_exit and profit_bps < 0:
-                loss_deep_enough = abs(profit_bps) >= self.cfg.momentum_exit_min_loss_bps
-                opened_me = datetime.fromisoformat(pos["opened_at"])
-                if opened_me.tzinfo is None:
-                    opened_me = opened_me.replace(tzinfo=timezone.utc)
-                elapsed_me = (now - opened_me).total_seconds() / 60
-                min_hold = live_max_hold * self.cfg.momentum_exit_min_hold_pct
-                held_long_enough = elapsed_me >= min_hold
-
-                if loss_deep_enough and held_long_enough:
-                    try:
-                        snap = await self.market.snapshot_symbol(symbol)
-                        if snap and snap.indicators.valid:
-                            hist = snap.indicators.macd_histogram
-                            prev = snap.indicators.macd_histogram_prev
-                            if side == "LONG" and hist < 0 and prev >= 0:
-                                should_momentum_exit = True
-                            elif side == "SHORT" and hist > 0 and prev <= 0:
-                                should_momentum_exit = True
-                    except Exception:
-                        pass
+                try:
+                    snap = await self.market.snapshot_symbol(symbol)
+                    if snap and snap.indicators.valid:
+                        hist = snap.indicators.macd_histogram
+                        prev = snap.indicators.macd_histogram_prev
+                        if side == "LONG" and hist < 0 and prev >= 0:
+                            should_momentum_exit = True
+                        elif side == "SHORT" and hist > 0 and prev <= 0:
+                            should_momentum_exit = True
+                except Exception:
+                    pass
 
             if should_momentum_exit:
                 try:

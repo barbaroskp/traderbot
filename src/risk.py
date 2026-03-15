@@ -24,7 +24,7 @@ De-escalation is FAST:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -102,14 +102,6 @@ class RiskManager:
         self._current_balance = cfg.initial_capital_usdt
         self._state_entered_at: datetime = datetime.now(timezone.utc)
 
-        # Daily loss circuit breaker state
-        self._daily_pnl: float = 0.0
-        self._daily_start_balance: float = cfg.initial_capital_usdt
-        self._daily_date: str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        self._daily_kill_until: datetime | None = None
-        self._daily_reduce_active: bool = False
-        self._daily_stop_active: bool = False
-
     @property
     def state(self) -> RiskState:
         return self._state
@@ -130,11 +122,6 @@ class RiskManager:
         self._current_balance += pnl
         if self._current_balance > self._peak_balance:
             self._peak_balance = self._current_balance
-
-        # Track daily P&L for circuit breaker
-        self._check_daily_reset()
-        self._daily_pnl += pnl
-        self._evaluate_daily_loss()
 
     def update_balance(self, balance: float) -> None:
         """Sync balance from actual account / paper portfolio."""
@@ -333,11 +320,7 @@ class RiskManager:
         kelly = max(self.cfg.kelly_min_fraction, min(self.cfg.kelly_max_fraction, kelly))
 
         if kelly <= 0:
-            log.warning(
-                "kelly negative: system has negative edge, skipping kelly sizing",
-                extra={"raw_kelly": round(kelly / self.cfg.kelly_fraction, 4)},
-            )
-            return None  # fall through to volatility/fraction sizing
+            return self.cfg.kelly_min_fraction
 
         log.debug(
             "kelly sizing",
@@ -455,111 +438,6 @@ class RiskManager:
         )
         return qty
 
-    # ── Daily Loss Circuit Breaker ─────────────────────────────────────────
-
-    def _check_daily_reset(self) -> None:
-        """Reset daily P&L tracking at midnight UTC."""
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        if today != self._daily_date:
-            self._daily_date = today
-            self._daily_pnl = 0.0
-            self._daily_start_balance = self._current_balance
-            self._daily_reduce_active = False
-            self._daily_stop_active = False
-            # Don't reset kill cooldown - it persists across days
-            log.info("daily loss tracker reset", extra={"date": today, "balance": self._current_balance})
-
-    def _evaluate_daily_loss(self) -> None:
-        """Evaluate daily loss thresholds and activate circuit breakers."""
-        if not self.cfg.use_daily_loss_limit:
-            return
-        if self._daily_start_balance <= 0:
-            return
-
-        daily_loss_pct = abs(min(0, self._daily_pnl)) / self._daily_start_balance
-
-        # Kill threshold: close everything + cooldown
-        if daily_loss_pct >= self.cfg.daily_loss_kill_pct:
-            if self._daily_kill_until is None:
-                self._daily_kill_until = datetime.now(timezone.utc) + timedelta(
-                    minutes=self.cfg.daily_loss_cooldown_minutes
-                )
-                log.warning(
-                    "DAILY LOSS KILL activated",
-                    extra={
-                        "daily_pnl": round(self._daily_pnl, 4),
-                        "daily_loss_pct": round(daily_loss_pct * 100, 2),
-                        "cooldown_until": self._daily_kill_until.isoformat(),
-                    },
-                )
-        # Stop threshold: no new trades
-        elif daily_loss_pct >= self.cfg.daily_loss_limit_pct:
-            if not self._daily_stop_active:
-                self._daily_stop_active = True
-                log.warning(
-                    "DAILY LOSS STOP activated - no new trades",
-                    extra={
-                        "daily_pnl": round(self._daily_pnl, 4),
-                        "daily_loss_pct": round(daily_loss_pct * 100, 2),
-                    },
-                )
-        # Reduce threshold: halve position sizes
-        elif daily_loss_pct >= self.cfg.daily_loss_reduce_pct:
-            if not self._daily_reduce_active:
-                self._daily_reduce_active = True
-                log.warning(
-                    "DAILY LOSS REDUCE activated - position sizes halved",
-                    extra={
-                        "daily_pnl": round(self._daily_pnl, 4),
-                        "daily_loss_pct": round(daily_loss_pct * 100, 2),
-                    },
-                )
-
-    @property
-    def daily_kill_active(self) -> bool:
-        """True if kill switch is active (all positions should be closed, no new trades)."""
-        if self._daily_kill_until is None:
-            return False
-        if datetime.now(timezone.utc) >= self._daily_kill_until:
-            self._daily_kill_until = None
-            log.info("daily loss kill cooldown expired, trading resumed")
-            return False
-        return True
-
-    @property
-    def daily_stop_active(self) -> bool:
-        """True if daily loss stop is active (no new trades, existing positions stay)."""
-        return self._daily_stop_active and not self.daily_kill_active
-
-    @property
-    def daily_reduce_active(self) -> bool:
-        """True if daily loss reduce is active (halve new position sizes)."""
-        return self._daily_reduce_active and not self._daily_stop_active and not self.daily_kill_active
-
-    def can_open_new_trade(self) -> bool:
-        """Check if circuit breaker allows opening new trades."""
-        if not self.cfg.use_daily_loss_limit:
-            return True
-        self._check_daily_reset()
-        if self.daily_kill_active:
-            return False
-        if self.daily_stop_active:
-            return False
-        return True
-
-    def get_daily_size_multiplier(self) -> float:
-        """Return position size multiplier based on daily loss state."""
-        if not self.cfg.use_daily_loss_limit:
-            return 1.0
-        if self.daily_reduce_active:
-            return 0.5
-        return 1.0
-
-    @property
-    def daily_pnl(self) -> float:
-        self._check_daily_reset()
-        return self._daily_pnl
-
     def get_diagnostics(self) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
         minutes_in_state = (now - self._state_entered_at).total_seconds() / 60
@@ -574,10 +452,6 @@ class RiskManager:
             "max_total_margin": self.get_max_total_margin(),
             "minutes_in_current_state": round(minutes_in_state, 1),
             "auto_recovery_in_minutes": self._time_to_recovery(),
-            "daily_pnl": round(self._daily_pnl, 4),
-            "daily_kill_active": self.daily_kill_active,
-            "daily_stop_active": self.daily_stop_active,
-            "daily_reduce_active": self.daily_reduce_active,
         }
 
     def _time_to_recovery(self) -> float:

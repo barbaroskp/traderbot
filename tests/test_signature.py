@@ -18,7 +18,6 @@ class TestBuildSignature:
         qs = build_query_string(params)
         sig = build_signature(qs, secret)
 
-        # Manually compute expected
         expected = hmac.new(
             secret.encode(), qs.encode(), hashlib.sha256
         ).hexdigest()

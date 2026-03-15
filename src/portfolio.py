@@ -22,23 +22,7 @@ class Portfolio:
     def __init__(self, cfg: Settings, db: Storage) -> None:
         self.cfg = cfg
         self.db = db
-        self._paper_balance: float = self._restore_balance()
-
-    def _restore_balance(self) -> float:
-        """Restore balance from last DB snapshot so it survives restarts."""
-        try:
-            row = self.db.fetch_one(
-                "SELECT balance_usdt FROM pnl_daily ORDER BY date DESC LIMIT 1"
-            )
-            if row and row["balance_usdt"] > 0:
-                log.info(
-                    "restored balance from DB",
-                    extra={"balance": row["balance_usdt"]},
-                )
-                return row["balance_usdt"]
-        except Exception:
-            pass
-        return self.cfg.initial_capital_usdt
+        self._paper_balance: float = cfg.initial_capital_usdt
 
     @property
     def balance(self) -> float:
