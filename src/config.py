@@ -59,18 +59,18 @@ class Settings(BaseSettings):
     fast_ema: int = 9
     slow_ema: int = 21
     entry_threshold_bps: float = 15.0      # dusuk esik: daha fazla coin sinyal uretsin (40 cok katiydi)
-    tp_bps: float = 150.0                  # agresif: daha hizli kar al (200 cok uzak, cogu vurmuyordu)
-    sl_bps: float = 60.0                   # agresif: siki SL kayiplari hemen kes (R:R = 2.5)
-    max_hold_minutes: int = 180            # more time for trade to develop
-    cooldown_minutes: int = 7              # agresif: firsatlari kacirma (10 hala uzun)
-    max_open_positions: int = 7            # agresif: daha fazla cesitlilik ve firsat (5 az)
-    max_z_score_bps: float = 300.0         # genis: breakout firsatlarini da yakala (150 cok daraldi)
+    tp_bps: float = 200.0                  # wider TP: let winners run (was 150, too tight)
+    sl_bps: float = 80.0                   # wider SL: survive noise (was 60, too tight → %58 SL hit rate)
+    max_hold_minutes: int = 240            # longer hold: give trades time (was 180)
+    cooldown_minutes: int = 10             # longer cooldown: less overtrading (was 7)
+    max_open_positions: int = 3            # concentrate capital (was 7 → too diluted)
+    max_z_score_bps: float = 250.0         # tighter: reject extreme moves (was 300)
     min_notional_usdt: float = 5.0          # exchange minimum notional: 5$ altindaki orderlari gonderme
 
     # ── Multi-Indicator (RSI, MACD, Bollinger) ───────────────
     rsi_period: int = 14
-    rsi_oversold: float = 35.0          # genis zone: daha fazla sinyal (25 cok kati, RSI 30-35 de firsat)
-    rsi_overbought: float = 65.0        # genis zone: daha fazla sinyal (75 cok kati)
+    rsi_oversold: float = 28.0          # strict: only deep oversold (was 35 → too many false signals)
+    rsi_overbought: float = 72.0        # strict: only deep overbought (was 65 → too many false signals)
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
@@ -84,7 +84,7 @@ class Settings(BaseSettings):
     higher_tf_interval: str = "15m"
     higher_tf_limit: int = 50
     use_higher_tf_trend: bool = True
-    require_higher_tf_alignment: bool = False   # 15m trend bonus olarak kalsin, hard-block yapmasin
+    require_higher_tf_alignment: bool = True   # ENABLED: reject signals against 15m trend (was False)
     atr_period: int = 14
     adx_period: int = 14
     adx_trend_threshold: float = 25.0
@@ -104,10 +104,11 @@ class Settings(BaseSettings):
     require_ema_in_mean_reversion: bool | None = None
     require_ema_in_trend_follow: bool | None = None
     require_ema_in_breakout: bool | None = None
-    min_confluence_score: int = 3            # 3 indikator yeterli (4 cok katiydi, sinyal uretmiyordu)
+    min_confluence_score: int = 5            # CRITICAL: need 5/9 agreement (was 3 → too many bad signals)
+    min_weighted_score: float = 55.0         # minimum weighted score for signal acceptance (new field for 9-indicator strategy)
     # When EMA is not required, demand stronger agreement.
-    min_confluence_no_ema: int = 3           # agresif: 3 yeterli, confidence tier ile kontrol et (4 cok yuksekti)
-    min_weighted_score_no_ema: float = 30.0    # agresif: %30 (35 gereksiz engelliyor, tier ile kontrol)
+    min_confluence_no_ema: int = 3
+    min_weighted_score_no_ema: float = 55.0
     risk_tight_min_weighted_score: float = 35.0   # TIGHT: biraz daha secici
     risk_ultra_min_weighted_score: float = 45.0   # ULTRA_TIGHT: secici ama hala islem ac
     require_trend_not_against: bool = False  # False = trend filtresi SHORT'lari engellemsin
@@ -117,8 +118,8 @@ class Settings(BaseSettings):
     use_regime_filter: bool = False  # KAPALI: TREND_FOLLOW/BREAKOUT_WATCH modlari sinyalleri cok engelliyor
     use_breakout_mode: bool = True
     use_orderbook_vote: bool = True
-    orderbook_imbalance_long: float = 0.65
-    orderbook_imbalance_short: float = 0.35
+    orderbook_imbalance_long: float = 0.62   # stricter: need clearer imbalance (was 0.65)
+    orderbook_imbalance_short: float = 0.38  # stricter (was 0.35)
     use_funding_filter: bool = False  # KAPALI: funding rate filtresi cok sinyal engelliyor
     funding_rate_threshold: float = 0.0003    # more sensitive to funding extremes
     funding_contra_bonus: float = 8.0         # bigger bonus for contrarian funding trades
@@ -205,8 +206,8 @@ class Settings(BaseSettings):
     use_vol_regime_sl_tp: bool = True
     vol_low_atr_bps: float = 30.0       # ATR < 30bps = low vol
     vol_high_atr_bps: float = 120.0     # ATR > 120bps = high vol
-    vol_low_sl_mult: float = 0.7        # low vol → tighter SL
-    vol_low_tp_mult: float = 0.7        # low vol → tighter TP
+    vol_low_sl_mult: float = 0.8        # less compression in low vol (was 0.7)
+    vol_low_tp_mult: float = 0.8        # less compression in low vol (was 0.7)
     vol_high_sl_mult: float = 1.5       # high vol → wider SL
     vol_high_tp_mult: float = 1.3       # high vol → wider TP (not as much as SL)
 
@@ -308,33 +309,33 @@ class Settings(BaseSettings):
     confidence_tier_low_mult: float = 0.6       # dusuk guven: %40 kucuk pozisyon
 
     # ── Momentum Quality Filter ──────────────────────────────
-    require_momentum_confirmation: bool = False  # momentum zaten indikator olarak oy veriyor, cift gate yapma
+    require_momentum_confirmation: bool = True  # ENABLED: MACD must confirm at min confluence (was False)
     momentum_bonus_weight: float = 15.0    # bigger momentum bonus (was 10)
     no_momentum_discount: float = 0.8      # hafif ceza: SHORT'lari cok penalize etmesin
 
     # ── Session/Funding Time Awareness ────────────────────────
-    avoid_funding_window: bool = False  # KAPALI: funding window filtresi gereksiz, sinyal kaybettiriyor
+    avoid_funding_window: bool = True  # ENABLED: avoid volatile funding windows (was False)
     funding_window_minutes: int = 5   # kapali ama yine de dusuk tut
 
     # ── Correlation Filter ────────────────────────────────────
     use_correlation_filter: bool = True
-    max_same_direction_positions: int = 5   # agresif: 5 ayni yon (7 pozisyon, 5'e kadar ayni yon ok)
+    max_same_direction_positions: int = 2   # conservative: max 2 same direction (was 5)
 
     # ── Smart Exit ────────────────────────────────────────────
-    use_momentum_exit: bool = True           # AKTIF: sadece zarardaki pozisyonlarda MACD cross tetikler
-    momentum_exit_min_hold_pct: float = 0.25  # pozisyon max_hold'un %25'ini doldurmadan exit yapma (gurultu filtresi)
-    momentum_exit_min_loss_bps: float = 15.0  # en az 15bps zararda olmalikayip yoksa momentum exit yapma
-    use_time_decay_sl: bool = True           # AKTIF: zarardaki eski pozisyonlarda SL'yi sik (kaybi sinirla)
-    time_decay_start_pct: float = 0.65       # max_hold'un %65'inden sonra baslat (toparlanma sansi ver)
-    time_decay_sl_reduction_pct: float = 0.25  # SL'yi en fazla %25 daraltan daha konservatif)
+    use_momentum_exit: bool = False          # DISABLED: was cutting winners early (SL handles risk)
+    momentum_exit_min_hold_pct: float = 0.50  # if re-enabled: wait longer (was 0.25)
+    momentum_exit_min_loss_bps: float = 30.0  # if re-enabled: deeper loss needed (was 15)
+    use_time_decay_sl: bool = True           # keep: but start later
+    time_decay_start_pct: float = 0.80       # start much later: give trades time (was 0.65)
+    time_decay_sl_reduction_pct: float = 0.15  # gentler tightening (was 0.25)
     # ── Profit Lock ──────────────────────────────────────────
     use_profit_lock: bool = True             # AKTIF: kar koruma — TP'nin %60'ina ulasinca SL'yi entry'ye cek
-    profit_lock_activation_pct: float = 0.60  # TP'nin %60'i karlaninca aktif
-    profit_lock_buffer_bps: float = 5.0       # entry + 5bps (komisyon ustu kucuk kar garanti)
+    profit_lock_activation_pct: float = 0.75  # lock later: let profits grow (was 0.60)
+    profit_lock_buffer_bps: float = 8.0       # more buffer above entry (was 5)
 
     # ── Tiered TP (Kademeli Kar Al) ─────────────────────────
     # 3 kademeli cikis: hizli kar al + kazanani kostur + trailing
-    use_tiered_tp: bool = True               # ANA SWITCH: kademeli TP aktif
+    use_tiered_tp: bool = False              # DISABLED: fragments R:R (avg win was near avg loss)
     tiered_tp1_fraction: float = 0.40        # %40 pozisyon: ilk hedefte kapat
     tiered_tp1_ratio: float = 0.50           # TP1 = toplam TP'nin %50'si (hizli kar)
     tiered_tp2_fraction: float = 0.30        # %30 pozisyon: ikinci hedefte kapat
@@ -347,42 +348,41 @@ class Settings(BaseSettings):
     # ── SL Randomization (Stop Hunting Korumasi) ────────────
     use_sl_randomization: bool = True         # SL'ye rastgele offset ekle
     sl_random_min_bps: float = 3.0           # minimum offset: 3bps
-    sl_random_max_bps: float = 12.0          # maximum offset: 12bps (SL'yi biraz genislet)
+    sl_random_max_bps: float = 8.0           # less random offset (was 12 → too much SL slippage)
 
     # ── Daily Loss Circuit Breaker ──────────────────────────
-    use_daily_loss_limit: bool = False        # KAPALI: gunluk kayip limiti yok — pozisyon daraltma/durdurma yapma
-    daily_loss_limit_pct: float = 0.04
-    daily_loss_reduce_pct: float = 0.02
-    daily_loss_kill_pct: float = 0.06
-    daily_loss_cooldown_minutes: int = 240
+    use_daily_loss_limit: bool = True         # ENABLED: essential protection (was False)
+    daily_loss_limit_pct: float = 0.02       # 2% daily → stop new trades (was 4%)
+    daily_loss_reduce_pct: float = 0.01      # 1% daily → halve sizes (was 2%)
+    daily_loss_kill_pct: float = 0.04        # 4% daily → close all (was 6%)
+    daily_loss_cooldown_minutes: int = 360   # 6h cooldown (was 4h)
 
     # ── Kelly Criterion Sizing (outputs MARGIN fraction) ──────
     use_kelly_sizing: bool = True
     kelly_fraction: float = 0.3  # quarter-Kelly: more conservative (was 0.5 half-Kelly)
-    kelly_min_trades: int = 30   # need more data for reliable stats (was 20)
-    kelly_min_fraction: float = 0.05  # minimum %5 (2% cok az: 6$ bakiye ile 0.12$ margin oluyordu)
-    kelly_max_fraction: float = 0.20  # cap %20 (8% cok dusuktu, bakiye buyuyunce de kucuk kaliyordu)
+    kelly_min_trades: int = 50   # need more data for reliable Kelly (was 30)
+    kelly_min_fraction: float = 0.03  # smaller min (was 0.05)
+    kelly_max_fraction: float = 0.15  # smaller max cap (was 0.20)
 
     # ── Volatility-Adjusted Sizing (outputs MARGIN amount) ───
     use_volatility_sizing: bool = True
-    target_risk_pct: float = 0.03            # %3 risk per trade (1.5% cok konservatif, buyuyemiyor)
+    target_risk_pct: float = 0.02            # 2% risk per trade (was 3% → too much with losing system)
     volatility_sizing_atr_mult: float = 1.5 # wider ATR buffer for sizing (was 1.2)
 
     # ── Selector ───────────────────────────────────────────────
-    max_spread_bps: float = 30.0   # genis spread: daha fazla coin (15 cok katiydi, cogu coin 15-30 arasi)
-    min_depth_usdt: float = 1000.0 # dusuk esik: kucuk pozisyonlar icin 1k$ yeterli (5k cok yuksekti)
-    vol_guard_bps: float = 600.0   # biraz genis: daha fazla firsat
-    shortlist_size: int = 300      # daha genis tarama: 300 coin (150 cok azdi)
-    min_volume_24h_usdt: float = 1_000_000.0  # 1M$ yeterli (5M cok yuksekti, firsatlari disladik)
+    max_spread_bps: float = 25.0   # tighter spread: better fills (was 30)
+    min_depth_usdt: float = 2000.0 # more liquidity needed (was 1000)
+    vol_guard_bps: float = 500.0   # tighter vol guard (was 600)
+    shortlist_size: int = 200      # focus on most liquid (was 300)
+    min_volume_24h_usdt: float = 3_000_000.0  # higher volume needed (was 1M)
 
     # ── Trade Management ───────────────────────────────────────
     use_dynamic_tp_sl: bool = True
-    atr_sl_multiplier: float = 1.2         # ATR-based SL: daha siki
-    atr_tp_multiplier: float = 3.0         # ATR-based TP: daha genis (R:R = 2.5x ATR)
-    min_sl_bps: float = 50.0              # minimum SL floor raised (was 30 – noise territory)
-    min_tp_bps: float = 100.0             # minimum TP floor raised (was 60)
-    # TP must be at least this many bps above round-trip fees so that at TP we have net profit
-    min_tp_net_bps: float = 25.0           # need 25bps net after fees (was 10)
+    atr_sl_multiplier: float = 1.5         # wider ATR SL: survive noise (was 1.2)
+    atr_tp_multiplier: float = 3.5         # wider ATR TP: let winners run (was 3.0)
+    min_sl_bps: float = 60.0              # higher SL floor (was 50)
+    min_tp_bps: float = 140.0             # higher TP floor (was 100)
+    min_tp_net_bps: float = 40.0           # need more net profit after fees (was 25)
     use_trailing_stop: bool = False          # KAPALI: tiered_tp3 bunu yapiyor artik
     trailing_activation_pct: float = 0.75
     trailing_distance_pct: float = 0.3
@@ -411,10 +411,10 @@ class Settings(BaseSettings):
     max_leverage_for_price: bool = True  # auto-reduce leverage if liq price too close
 
     # ── Risk State Thresholds ────────────────────────────────────
-    risk_state_disabled: bool = True   # True = HER ZAMAN NORMAL, TIGHT/ULTRA yok
-    risk_consec_losses_tight: int = 4          # escalate faster on losing streaks (was 8)
-    risk_drawdown_pct_tight: float = 5.0       # tighter drawdown trigger (was 8%)
-    risk_drawdown_min_for_consec_tight: float = 1.5
+    risk_state_disabled: bool = False  # ENABLED: essential risk protection (was True → disabled!)
+    risk_consec_losses_tight: int = 3          # trigger faster (was 4)
+    risk_drawdown_pct_tight: float = 3.0       # trigger earlier (was 5%)
+    risk_drawdown_min_for_consec_tight: float = 1.0
     risk_api_error_rate_tight: float = 0.3
     risk_consec_losses_ultra: int = 7          # ultra after 7 losses (was 14)
     risk_drawdown_pct_ultra: float = 12.0      # ultra at 12% drawdown (was 18%)
@@ -444,7 +444,7 @@ class Settings(BaseSettings):
     swing_leverage: int = 3                # lower leverage for swing (longer hold)
 
     # ── Scheduling ─────────────────────────────────────────────
-    scan_interval_minutes: int = 3         # daha sik tarama: firsatlari yakala (5 dk fazla yavas)
+    scan_interval_minutes: int = 5         # slower scan: less noise/overtrading (was 3)
     scan_interval_active_minutes: int = 2  # moderate active scan (was 1)
     use_adaptive_scan: bool = True
     universe_refresh_hours: int = 6
@@ -457,7 +457,7 @@ class Settings(BaseSettings):
     soft_kill_min_balance_ratio: float = 0.01  # pratik olarak devre disi
     soft_kill_cooldown_cycles: int = 0      # bekleme yok
     reconcile_interval_cycles: int = 5
-    selector_lenient_enabled: bool = True   # AKTIF: filter cok kati olursa lenient fallback devreye girsin
+    selector_lenient_enabled: bool = False  # DISABLED: no lenient fallback (was True → let in bad coins)
     selector_lenient_spread_mult: float = 1.25
     selector_lenient_depth_mult: float = 0.75
     selector_lenient_min_tradeable: int = 8

@@ -36,19 +36,16 @@ def _compute_tp_sl_bps(
     cfg: Settings, snap: SymbolSnapshot, entry_price: float,
     trade_type: str = "scalp",
 ) -> tuple[float, float]:
-    """Compute SL/TP bps (ATR-based when enabled). Swing uses wider values.
+    """Compute SL/TP bps (ATR-based when enabled).
     TP is floored so that after fees we have at least min_tp_net_bps net profit.
     """
-    is_swing = trade_type == "swing"
-    base_sl = cfg.swing_sl_bps if is_swing else cfg.sl_bps
-    base_tp = cfg.swing_tp_bps if is_swing else cfg.tp_bps
-    atr_sl_mult = cfg.swing_atr_sl_multiplier if is_swing else cfg.atr_sl_multiplier
-    atr_tp_mult = cfg.swing_atr_tp_multiplier if is_swing else cfg.atr_tp_multiplier
+    base_sl = cfg.sl_bps
+    base_tp = cfg.tp_bps
 
     if cfg.use_dynamic_tp_sl and snap.indicators.atr > 0 and entry_price > 0:
         atr_bps = (snap.indicators.atr / entry_price) * 10_000
-        sl_bps = max(atr_bps * atr_sl_mult, cfg.min_sl_bps)
-        tp_bps = max(atr_bps * atr_tp_mult, cfg.min_tp_bps)
+        sl_bps = max(atr_bps * cfg.atr_sl_multiplier, cfg.min_sl_bps)
+        tp_bps = max(atr_bps * cfg.atr_tp_multiplier, cfg.min_tp_bps)
     else:
         sl_bps = base_sl
         tp_bps = base_tp
@@ -424,11 +421,8 @@ class PaperExecution(ExecutionAdapter):
                 "opened_at": now,
                 "status": "OPEN",
                 "is_paper": 1,
-                "trade_type": getattr(signal, "trade_type", "scalp"),
-                "max_hold_minutes": (
-                    self.cfg.swing_max_hold_minutes if getattr(signal, "trade_type", "scalp") == "swing"
-                    else self.cfg.max_hold_minutes
-                ),
+                "trade_type": "scalp",
+                "max_hold_minutes": self.cfg.max_hold_minutes,
             },
         )
 
@@ -525,9 +519,9 @@ class PaperExecution(ExecutionAdapter):
 
             exit_reason = ""
 
-            # ── Partial TP1 check (tiered or legacy partial TP) ───
+            # ── Partial TP1 check (tiered TP) ─────────────────────
             if (
-                (self.cfg.use_partial_tp or self.cfg.use_tiered_tp)
+                self.cfg.use_tiered_tp
                 and not pos.get("partial_tp_filled", 0)
                 and pos.get("tp1_order_id")
             ):
@@ -547,39 +541,18 @@ class PaperExecution(ExecutionAdapter):
                         pos["remaining_qty"] = remaining
                         pos["qty"] = remaining
 
-                        # Move SL to breakeven after TP1 (always for tiered, optional for legacy)
-                        if self.cfg.use_breakeven_stop or (self.cfg.use_tiered_tp and self.cfg.tiered_move_sl_after_tp1):
+                        # Move SL to breakeven after TP1
+                        if self.cfg.use_tiered_tp and self.cfg.tiered_move_sl_after_tp1:
+                            buf = getattr(self.cfg, "profit_lock_buffer_bps", 5.0)
                             if side == "LONG":
-                                be_price = entry * (1 + self.cfg.breakeven_buffer_bps / 10_000)
+                                be_price = entry * (1 + buf / 10_000)
                             else:
-                                be_price = entry * (1 - self.cfg.breakeven_buffer_bps / 10_000)
+                                be_price = entry * (1 - buf / 10_000)
                             self._update_sl_order_price(pos, side, be_price)
                             self.db.execute(
                                 "UPDATE positions SET breakeven_triggered=1 WHERE id=?",
                                 (pos["id"],),
                             )
-
-            # ── Breakeven check ─────────────────────────────────
-            if self.cfg.use_breakeven_stop and not pos.get("breakeven_triggered", 0):
-                if profit_bps >= tp_bps * self.cfg.breakeven_activation_pct:
-                    if side == "LONG":
-                        be_price = entry * (1 + self.cfg.breakeven_buffer_bps / 10_000)
-                    else:
-                        be_price = entry * (1 - self.cfg.breakeven_buffer_bps / 10_000)
-                    self._update_sl_order_price(pos, side, be_price)
-                    self.db.execute(
-                        "UPDATE positions SET breakeven_triggered=1 WHERE id=?",
-                        (pos["id"],),
-                    )
-
-            # ── Trailing stop update ────────────────────────────
-            if self.cfg.use_trailing_stop and profit_bps >= tp_bps * self.cfg.trailing_activation_pct:
-                trail_bps = sl_bps * self.cfg.trailing_distance_pct
-                if side == "LONG":
-                    new_sl = mark * (1 - trail_bps / 10_000)
-                else:
-                    new_sl = mark * (1 + trail_bps / 10_000)
-                self._update_sl_order_price(pos, side, new_sl)
 
             # ── Profit Lock: SL to breakeven when reaching X% of TP ──
             if self.cfg.use_profit_lock and not pos.get("breakeven_triggered", 0):
@@ -599,8 +572,7 @@ class PaperExecution(ExecutionAdapter):
 
             # ── Time-decay SL tightening ─────────────────────────
             pos_max_hold = int(pos.get("max_hold_minutes") or 0) or (
-                self.cfg.swing_max_hold_minutes if pos.get("trade_type") == "swing"
-                else self.cfg.max_hold_minutes
+                self.cfg.max_hold_minutes
             )
             if self.cfg.use_time_decay_sl and not exit_reason:
                 opened = datetime.fromisoformat(pos["opened_at"])
@@ -1136,26 +1108,11 @@ class LiveExecution(ExecutionAdapter):
                 is_paper=False,
             )
 
-        # ── Execution quality tracking ────────────────────────
-        if self.cfg.use_execution_tracking and ref_price > 0:
-            slippage_bps = abs(avg_price - ref_price) / ref_price * 10_000
-            if slippage_bps > self.cfg.max_acceptable_slippage_bps:
-                log.warning(
-                    "live: high slippage detected",
-                    extra={
-                        "symbol": signal.symbol,
-                        "ref_price": ref_price,
-                        "fill_price": avg_price,
-                        "slippage_bps": round(slippage_bps, 2),
-                        "threshold_bps": self.cfg.max_acceptable_slippage_bps,
-                    },
-                )
-
         # ── Place SL + TP ──────────────────────────────────────
         notional = avg_price * filled_qty
         close_side = "SELL" if signal.side == "LONG" else "BUY"
 
-        sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, avg_price, getattr(signal, "trade_type", "scalp"))
+        sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, avg_price)
 
         # SL Randomization (stop hunting koruması)
         if self.cfg.use_sl_randomization:
@@ -1386,11 +1343,8 @@ class LiveExecution(ExecutionAdapter):
                 "opened_at": now,
                 "status": "OPEN",
                 "is_paper": 0,
-                "trade_type": getattr(signal, "trade_type", "scalp"),
-                "max_hold_minutes": (
-                    self.cfg.swing_max_hold_minutes if getattr(signal, "trade_type", "scalp") == "swing"
-                    else self.cfg.max_hold_minutes
-                ),
+                "trade_type": "scalp",
+                "max_hold_minutes": self.cfg.max_hold_minutes,
             },
         )
 
@@ -1560,28 +1514,6 @@ class LiveExecution(ExecutionAdapter):
                 except BingXClientError as exc:
                     log.warning("live: tp1 status check failed", extra={"error": str(exc)})
 
-            # Breakeven update
-            if self.cfg.use_breakeven_stop and not pos.get("breakeven_triggered", 0):
-                if profit_bps >= tp_bps * self.cfg.breakeven_activation_pct:
-                    if side == "LONG":
-                        be_price = entry * (1 + self.cfg.breakeven_buffer_bps / 10_000)
-                    else:
-                        be_price = entry * (1 - self.cfg.breakeven_buffer_bps / 10_000)
-                    await self._update_live_sl(pos, side, exch_qty, be_price)
-                    self.db.execute(
-                        "UPDATE positions SET breakeven_triggered=1 WHERE id=?",
-                        (pos["id"],),
-                    )
-
-            # Trailing stop update
-            if self.cfg.use_trailing_stop and profit_bps >= tp_bps * self.cfg.trailing_activation_pct:
-                trail_bps = sl_bps * self.cfg.trailing_distance_pct
-                if side == "LONG":
-                    new_sl = mark * (1 - trail_bps / 10_000)
-                else:
-                    new_sl = mark * (1 + trail_bps / 10_000)
-                await self._update_live_sl(pos, side, exch_qty, new_sl)
-
             # ── Profit Lock: SL to breakeven when reaching X% of TP ──
             if self.cfg.use_profit_lock and not pos.get("breakeven_triggered", 0):
                 if profit_bps >= tp_bps * self.cfg.profit_lock_activation_pct:
@@ -1600,8 +1532,7 @@ class LiveExecution(ExecutionAdapter):
 
             # Time-decay SL tightening (live)
             live_max_hold = int(pos.get("max_hold_minutes") or 0) or (
-                self.cfg.swing_max_hold_minutes if pos.get("trade_type") == "swing"
-                else self.cfg.max_hold_minutes
+                self.cfg.max_hold_minutes
             )
             if self.cfg.use_time_decay_sl:
                 opened_td = datetime.fromisoformat(pos["opened_at"])

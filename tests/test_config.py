@@ -56,17 +56,17 @@ class TestConfig:
         assert cfg.per_trade_fraction == 0.15
         # Signal generation
         assert cfg.entry_threshold_bps == 15.0
-        assert cfg.min_confluence_score == 3
+        assert cfg.min_confluence_score == 5
         assert cfg.min_confluence_no_ema == 3
-        assert cfg.min_weighted_score_no_ema == 30.0
+        assert cfg.min_weighted_score_no_ema == 55.0
         assert cfg.require_ema_in_confluence is False
         assert cfg.use_regime_filter is False
         assert cfg.rsi_full_vote_only is False
         # Selector
-        assert cfg.max_spread_bps == 30.0
-        assert cfg.min_depth_usdt == 1000.0
-        assert cfg.shortlist_size == 300
+        assert cfg.max_spread_bps == 25.0
+        assert cfg.min_depth_usdt == 2000.0
+        assert cfg.shortlist_size == 200
         # Positions
-        assert cfg.max_open_positions == 7
-        assert cfg.cooldown_minutes == 7
-        assert cfg.scan_interval_minutes == 3
+        assert cfg.max_open_positions == 3
+        assert cfg.cooldown_minutes == 10
+        assert cfg.scan_interval_minutes == 5

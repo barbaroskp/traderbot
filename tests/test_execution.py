@@ -144,8 +144,8 @@ class TestPaperExecution:
         )
         await paper_exec.execute_signal(signal, snap, qty=0.001, current_total_margin=0)
 
-        # Backdate opened_at to exceed max_hold_minutes
-        old_time = (datetime.now(timezone.utc) - timedelta(minutes=200)).isoformat()
+        # Backdate opened_at to exceed max_hold_minutes (240min default)
+        old_time = (datetime.now(timezone.utc) - timedelta(minutes=300)).isoformat()
         db.execute("UPDATE positions SET opened_at=? WHERE status='OPEN'", (old_time,))
 
         mock_market.fetch_mark_price.return_value = 50100.0

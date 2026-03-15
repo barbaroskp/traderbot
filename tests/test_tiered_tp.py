@@ -153,6 +153,7 @@ class TestDailyLossCircuitBreaker:
 
     def test_reduce_threshold_no_effect_when_disabled(self, tiered_cfg, tiered_db) -> None:
         """Daily loss limit disabled: losses should NOT halve position sizes."""
+        tiered_cfg.use_daily_loss_limit = False
         risk = RiskManager(tiered_cfg, tiered_db)
         risk.record_trade_result(-0.50)
 
@@ -162,6 +163,7 @@ class TestDailyLossCircuitBreaker:
 
     def test_stop_threshold_no_effect_when_disabled(self, tiered_cfg, tiered_db) -> None:
         """Daily loss limit disabled: losses should NOT block new trades."""
+        tiered_cfg.use_daily_loss_limit = False
         risk = RiskManager(tiered_cfg, tiered_db)
         risk.record_trade_result(-0.90)
 
@@ -170,6 +172,7 @@ class TestDailyLossCircuitBreaker:
 
     def test_kill_threshold_no_effect_when_disabled(self, tiered_cfg, tiered_db) -> None:
         """Daily loss limit disabled: losses should NOT activate kill switch."""
+        tiered_cfg.use_daily_loss_limit = False
         risk = RiskManager(tiered_cfg, tiered_db)
         risk.record_trade_result(-1.30)
 
@@ -178,6 +181,7 @@ class TestDailyLossCircuitBreaker:
 
     def test_daily_reset_clears_state(self, tiered_cfg, tiered_db) -> None:
         """New day should reset daily P&L tracking."""
+        tiered_cfg.use_daily_loss_limit = False
         risk = RiskManager(tiered_cfg, tiered_db)
         risk.record_trade_result(-0.90)
 
