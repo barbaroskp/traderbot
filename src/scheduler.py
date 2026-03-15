@@ -238,8 +238,13 @@ class Scheduler:
         if self.cfg.swing_enabled and self._cycle_count % self.cfg.swing_scan_every_n_cycles == 0:
             swing_signals = await self._run_swing_cycle(open_positions, risk_state)
 
+        # ── 5d. Position signal generation (every N cycles, ~5 hours) ──
+        position_signals = []
+        if self.cfg.position_enabled and self._cycle_count % self.cfg.position_scan_every_n_cycles == 0:
+            position_signals = await self._run_position_cycle(open_positions, risk_state)
+
         # ── 6. Execute signals (best first by weighted score) ─────
-        all_signals = signals + swing_signals
+        all_signals = signals + swing_signals + position_signals
         signals_sorted = sorted(all_signals, key=lambda s: (s.confluence_score, s.weighted_score), reverse=True)
         current_margin = self.portfolio.get_total_margin(is_paper)
         executed = 0
@@ -267,21 +272,27 @@ class Scheduler:
                     continue
 
                 # ── 1. Determine leverage FIRST (needed for margin-based sizing) ──
-                if getattr(sig, "trade_type", "scalp") == "swing":
+                trade_type = getattr(sig, "trade_type", "scalp")
+                if trade_type == "position":
+                    effective_leverage: int | None = self.cfg.position_leverage
+                elif trade_type == "swing":
                     effective_leverage: int | None = self.cfg.swing_leverage
                 else:
                     effective_leverage: int | None = self._dynamic_leverage(sig)
 
                 # High-conviction check (affects both leverage and margin)
-                is_high_conviction = (
-                    sig.confluence_score >= self.cfg.high_conviction_min_confluence
-                    and sig.weighted_score >= self.cfg.high_conviction_min_weighted_score
-                )
-                if is_high_conviction:
-                    effective_leverage = max(
-                        effective_leverage or 0,
-                        self.cfg.leverage_high_conviction,
-                    ) or None
+                # Position trades use fixed leverage (2x), skip high-conviction override
+                is_high_conviction = False
+                if trade_type != "position":
+                    is_high_conviction = (
+                        sig.confluence_score >= self.cfg.high_conviction_min_confluence
+                        and sig.weighted_score >= self.cfg.high_conviction_min_weighted_score
+                    )
+                    if is_high_conviction:
+                        effective_leverage = max(
+                            effective_leverage or 0,
+                            self.cfg.leverage_high_conviction,
+                        ) or None
 
                 if effective_leverage is not None:
                     effective_leverage = min(effective_leverage, self.cfg.max_leverage_allowed)
@@ -327,7 +338,7 @@ class Scheduler:
                 # ── Fee-adjusted expectancy guard ──
                 # Skip trade if TP after fees doesn't provide positive expectancy
                 trade_type = getattr(sig, "trade_type", "scalp")
-                sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, snap.mid_price, trade_type)
+                sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, snap.mid_price, trade_type, side=sig.side)
                 round_trip_fee_bps = 2.0 * self.cfg.fee_rate_bps
                 net_tp_bps = tp_bps - round_trip_fee_bps
                 net_sl_bps = sl_bps + round_trip_fee_bps
@@ -390,7 +401,10 @@ class Scheduler:
                     # Track margin usage: margin = notional / leverage
                     fill_notional = result.avg_fill_price * result.filled_qty
                     current_margin += fill_notional / final_leverage
-                    if getattr(sig, "trade_type", "scalp") == "swing":
+                    sig_trade_type = getattr(sig, "trade_type", "scalp")
+                    if sig_trade_type == "position":
+                        self.strategy.set_position_cooldown(sig.symbol)
+                    elif sig_trade_type == "swing":
                         self.strategy.set_swing_cooldown(sig.symbol)
                     else:
                         self.strategy.set_cooldown(sig.symbol)
@@ -419,6 +433,7 @@ class Scheduler:
                 "shortlisted": filter_stats.shortlisted,
                 "signals_scalp": len(signals),
                 "signals_swing": len(swing_signals),
+                "signals_position": len(position_signals),
                 "executed": executed,
                 "exits": len(closed),
                 "cancelled_orders": cancelled,
@@ -808,6 +823,52 @@ class Scheduler:
             return swing_signals
         except Exception as exc:
             log.warning("swing cycle error", extra={"error": str(exc)})
+            return []
+
+    async def _run_position_cycle(
+        self,
+        open_positions: list[dict[str, Any]],
+        risk_state: Any,
+    ) -> list:
+        """Run position signal generation on daily klines with weekly trend filter.
+
+        Uses S/R levels, Fibonacci, and EMA200 for analyst-style targets.
+        Scans less frequently (every ~5 hours) since daily candles change slowly.
+        """
+        try:
+            shortlisted = self.selector.last_shortlist
+            if not shortlisted:
+                return []
+
+            # Scan top 30 symbols (daily klines are heavier, be conservative with API)
+            scan_symbols = shortlisted[:30]
+
+            position_snaps = await self.market.batch_snapshots_position(
+                symbols=scan_symbols,
+                position_interval=self.cfg.position_interval,
+                position_limit=self.cfg.position_kline_limit,
+                trend_interval=self.cfg.position_trend_interval,
+                trend_limit=self.cfg.position_trend_limit,
+                concurrency=2,
+            )
+
+            position_signals = self.strategy.generate_position_signals(
+                snapshots=position_snaps,
+                open_positions=open_positions,
+                risk_state=risk_state.value,
+            )
+
+            log.info(
+                "position cycle",
+                extra={
+                    "scanned": len(scan_symbols),
+                    "snapshots": len(position_snaps),
+                    "signals": len(position_signals),
+                },
+            )
+            return position_signals
+        except Exception as exc:
+            log.warning("position cycle error", extra={"error": str(exc)})
             return []
 
     def _dynamic_leverage(self, sig: Any) -> int | None:

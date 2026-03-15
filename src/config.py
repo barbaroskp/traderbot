@@ -274,6 +274,37 @@ class Settings(BaseSettings):
     risk_max_minutes_in_tight: int = 30        # longer in tight before auto-recovery (was 20)
     risk_max_minutes_in_ultra: int = 60        # longer in ultra (was 45)
 
+    # ── Position Trading (1d candles, analyst-style dynamic TP/SL) ──
+    position_enabled: bool = True
+    position_interval: str = "1d"             # daily candles for position trading
+    position_kline_limit: int = 200           # ~200 days of daily data (S/R, Fibonacci)
+    position_trend_interval: str = "1w"       # weekly candles for macro trend filter
+    position_trend_limit: int = 50            # ~50 weeks of weekly data
+    position_scan_every_n_cycles: int = 100   # run position scan every ~5 hours (100×3min)
+    position_max_hold_minutes: int = 43200    # 30 days max hold (30×24×60)
+    position_max_positions: int = 3           # max 3 concurrent position trades
+    position_min_confluence: int = 3          # need 3+ cluster agreement
+    position_require_trend_alignment: bool = True  # weekly trend MUST align (long-term = safer)
+    position_cooldown_minutes: int = 240      # 4 hours cooldown between position trades
+    position_leverage: int = 2               # fixed 2x leverage (conservative for long-term)
+    position_per_trade_fraction: float = 0.12  # %12 of balance per position trade
+
+    # ── Position Dynamic TP/SL (analyst-style: S/R, Fibonacci, structure) ──
+    position_use_dynamic_targets: bool = True  # use S/R & Fibonacci for TP/SL
+    position_sr_lookback: int = 100           # bars to look back for S/R levels
+    position_sr_touch_count: int = 3          # min touches to confirm S/R level
+    position_sr_tolerance_pct: float = 0.5    # %0.5 tolerance for S/R zone grouping
+    position_fib_enabled: bool = True         # use Fibonacci retracement/extension
+    position_sl_buffer_pct: float = 0.5       # %0.5 buffer below/above S/R for SL
+    position_tp_buffer_pct: float = 0.3       # %0.3 buffer inside S/R for TP
+    # Fallback fixed values (if dynamic targets can't be computed)
+    position_fallback_tp_bps: float = 800.0   # 8% fallback TP
+    position_fallback_sl_bps: float = 400.0   # 4% fallback SL
+    position_min_tp_bps: float = 300.0        # minimum 3% TP (don't target too close)
+    position_max_sl_bps: float = 500.0        # maximum 5% SL (risk cap)
+    position_min_sl_bps: float = 150.0        # minimum 1.5% SL (avoid noise)
+    position_min_rr_ratio: float = 1.5        # minimum reward:risk ratio (analyst standard)
+
     # ── Swing Trading (1h candles, wider TP/SL) ────────────────
     swing_enabled: bool = True
     swing_interval: str = "1h"

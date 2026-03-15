@@ -1475,6 +1475,140 @@ class Strategy:
         )
         return signals
 
+    def generate_position_signals(
+        self,
+        snapshots: list[SymbolSnapshot],
+        open_positions: list[dict[str, Any]],
+        risk_state: str = "NORMAL",
+    ) -> list[Signal]:
+        """Generate position (long-term) signals from daily kline snapshots.
+
+        Uses the same cluster voting system but with position-specific filters:
+        - Weekly trend alignment REQUIRED by default (long-term = safer)
+        - EMA200 trend confirmation
+        - S/R and Fibonacci awareness (targets computed in execution layer)
+        - Higher min confluence for conviction
+        - Separate position count and cooldown management
+        """
+        now = datetime.now(timezone.utc)
+        cfg = self.cfg
+
+        # Count existing position trades separately
+        position_positions = [p for p in open_positions if p.get("trade_type") == "position"]
+        all_open_symbols = {p["symbol"] for p in open_positions}
+
+        if len(position_positions) >= cfg.position_max_positions:
+            return []
+
+        signals: list[Signal] = []
+        pos_count = len(position_positions)
+
+        for snap in snapshots:
+            if snap.symbol in all_open_symbols:
+                continue
+            if pos_count >= cfg.position_max_positions:
+                break
+
+            # Check position cooldown
+            last_cd = self._cooldowns.get(f"position_{snap.symbol}")
+            if last_cd:
+                elapsed = (now - last_cd).total_seconds() / 60
+                if elapsed < cfg.position_cooldown_minutes:
+                    continue
+
+            indicators = snap.indicators
+            if not indicators.valid:
+                continue
+
+            votes = self._compute_votes(snap)
+            cluster_votes_pos, contra_bonus = self._compute_cluster_votes(votes)
+            long_clusters = [c for c in cluster_votes_pos if c.side == "LONG"]
+            short_clusters = [c for c in cluster_votes_pos if c.side == "SHORT"]
+
+            pos_min = cfg.position_min_confluence
+            if len(long_clusters) >= pos_min and len(long_clusters) > len(short_clusters):
+                side = "LONG"
+                confluence = len(long_clusters)
+            elif len(short_clusters) >= pos_min and len(short_clusters) > len(long_clusters):
+                side = "SHORT"
+                confluence = len(short_clusters)
+            else:
+                continue
+
+            # Normalize weighted score
+            weighted, _raw = self._normalize_weighted_score(votes, side)
+            weighted = min(weighted, 100.0)
+
+            # Weekly trend MUST align (configurable but default True for position)
+            if cfg.position_require_trend_alignment and indicators.higher_tf_trend != "NEUTRAL":
+                if side == "LONG" and indicators.higher_tf_trend != "UP":
+                    continue
+                if side == "SHORT" and indicators.higher_tf_trend != "DOWN":
+                    continue
+
+            # EMA200 confirmation: for LONG price should be above EMA200, for SHORT below
+            if indicators.ema_200 > 0:
+                if side == "LONG" and indicators.price_vs_ema200 == "BELOW":
+                    # Price below EMA200 = not ideal for long-term LONG (but allow if strong signal)
+                    if weighted < 60.0:
+                        continue
+                if side == "SHORT" and indicators.price_vs_ema200 == "ABOVE":
+                    if weighted < 60.0:
+                        continue
+
+            # Must have S/R or Fibonacci data for meaningful target placement
+            has_targets = bool(indicators.support_levels or indicators.resistance_levels or indicators.fib_levels)
+            if not has_targets:
+                continue
+
+            # Spread/depth checks (more lenient for position trades)
+            min_depth = min(snap.bid_depth_usdt, snap.ask_depth_usdt)
+            if snap.spread_bps > cfg.max_spread_bps * 1.5 or min_depth < cfg.min_depth_usdt * 0.5:
+                continue
+
+            signal = Signal(
+                symbol=snap.symbol,
+                side=side,
+                z_score_bps=snap.z_score_bps,
+                mid_price=snap.mid_price,
+                fast_ema=snap.fast_ema,
+                slow_ema=snap.slow_ema,
+                spread_bps=snap.spread_bps,
+                depth_usdt=min_depth,
+                confluence_score=confluence,
+                weighted_score=weighted,
+                indicator_votes=votes,
+                rsi=indicators.rsi,
+                macd_histogram=indicators.macd_histogram,
+                macd_histogram_prev=indicators.macd_histogram_prev,
+                bollinger_pct=indicators.bollinger_pct,
+                trend_direction=indicators.trend_direction,
+                higher_tf_trend=indicators.higher_tf_trend,
+                atr=indicators.atr,
+                adx=indicators.adx,
+                plus_di=indicators.plus_di,
+                minus_di=indicators.minus_di,
+                funding_rate=snap.funding_rate,
+                volume_ratio=indicators.volume_ratio,
+                volume_spike=indicators.volume_spike,
+                mode="POSITION",
+                trade_type="position",
+            )
+            signal.accepted = True
+            signals.append(signal)
+            self._persist_signal(signal)
+            pos_count += 1
+
+        log.info(
+            "position signal generation",
+            extra={"candidates": len(snapshots), "accepted": len(signals)},
+        )
+        return signals
+
+    def set_position_cooldown(self, symbol: str) -> None:
+        """Set cooldown for position trade."""
+        self._cooldowns[f"position_{symbol}"] = datetime.now(timezone.utc)
+
     def set_swing_cooldown(self, symbol: str) -> None:
         """Set cooldown for swing trade."""
         self._cooldowns[f"swing_{symbol}"] = datetime.now(timezone.utc)

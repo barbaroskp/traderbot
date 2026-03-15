@@ -109,6 +109,20 @@ class Indicators:
     # ── Composite Sentiment ──
     composite_sentiment: float = 0.0     # -100 to +100 (bearish to bullish)
     fear_greed_index: float = 50.0       # 0-100, from alternative.me API
+    # ── Support/Resistance Levels (for position trading) ──
+    support_levels: list = field(default_factory=list)    # [(price, strength)] sorted ascending
+    resistance_levels: list = field(default_factory=list)  # [(price, strength)] sorted ascending
+    # ── Fibonacci Levels ──
+    fib_levels: dict = field(default_factory=dict)  # {"0.236": price, "0.382": price, ...}
+    fib_trend: str = "NEUTRAL"  # UP (retracement of uptrend) or DOWN (retracement of downtrend)
+    # ── Structure (swing highs/lows for analyst-style targets) ──
+    swing_high: float = 0.0    # most recent significant swing high
+    swing_low: float = 0.0     # most recent significant swing low
+    trend_high: float = 0.0    # highest price in lookback period
+    trend_low: float = 0.0     # lowest price in lookback period
+    # ── EMA 200 (long-term trend) ──
+    ema_200: float = 0.0
+    price_vs_ema200: str = "NEUTRAL"  # ABOVE, BELOW, NEUTRAL
 
 
 @dataclass
@@ -1091,6 +1105,237 @@ class MarketData:
         vah = bin_prices[hi_idx] + bin_size / 2  # upper edge of high bin
         return poc, vah, val
 
+    # ── Support/Resistance Detection ─────────────────────────────
+
+    @staticmethod
+    def _compute_support_resistance(
+        highs: list[float],
+        lows: list[float],
+        closes: list[float],
+        lookback: int = 100,
+        tolerance_pct: float = 0.5,
+        min_touches: int = 3,
+    ) -> tuple[list[tuple[float, int]], list[tuple[float, int]]]:
+        """Detect support/resistance levels from swing highs/lows.
+
+        Returns (supports, resistances) as lists of (price, touch_count).
+        Uses pivot point detection + zone grouping.
+        """
+        n = min(lookback, len(closes))
+        if n < 20:
+            return [], []
+
+        h = highs[-n:]
+        l = lows[-n:]
+        c = closes[-n:]
+
+        # Detect pivot highs/lows (local extremes with ±2 bar confirmation)
+        pivot_highs: list[float] = []
+        pivot_lows: list[float] = []
+        for i in range(2, n - 2):
+            if h[i] >= h[i-1] and h[i] >= h[i-2] and h[i] >= h[i+1] and h[i] >= h[i+2]:
+                pivot_highs.append(h[i])
+            if l[i] <= l[i-1] and l[i] <= l[i-2] and l[i] <= l[i+1] and l[i] <= l[i+2]:
+                pivot_lows.append(l[i])
+
+        def _group_levels(levels: list[float], tol_pct: float) -> list[tuple[float, int]]:
+            """Group nearby price levels into zones, count touches."""
+            if not levels:
+                return []
+            sorted_lvls = sorted(levels)
+            zones: list[tuple[float, int]] = []
+            current_group = [sorted_lvls[0]]
+            for lvl in sorted_lvls[1:]:
+                if current_group and abs(lvl - current_group[0]) / current_group[0] * 100 <= tol_pct:
+                    current_group.append(lvl)
+                else:
+                    avg_price = sum(current_group) / len(current_group)
+                    zones.append((avg_price, len(current_group)))
+                    current_group = [lvl]
+            if current_group:
+                avg_price = sum(current_group) / len(current_group)
+                zones.append((avg_price, len(current_group)))
+            return [(p, cnt) for p, cnt in zones if cnt >= min_touches]
+
+        current_price = c[-1]
+        supports = [(p, cnt) for p, cnt in _group_levels(pivot_lows, tolerance_pct) if p < current_price]
+        resistances = [(p, cnt) for p, cnt in _group_levels(pivot_highs, tolerance_pct) if p > current_price]
+
+        # Sort: supports descending (nearest first), resistances ascending (nearest first)
+        supports.sort(key=lambda x: x[0], reverse=True)
+        resistances.sort(key=lambda x: x[0])
+        return supports, resistances
+
+    @staticmethod
+    def _compute_fibonacci_levels(
+        highs: list[float],
+        lows: list[float],
+        closes: list[float],
+        lookback: int = 100,
+    ) -> tuple[dict[str, float], str]:
+        """Compute Fibonacci retracement levels from the dominant trend.
+
+        Identifies the major swing high/low in the lookback period,
+        then calculates Fibonacci retracement + extension levels.
+        Returns (fib_dict, trend_direction).
+        """
+        n = min(lookback, len(closes))
+        if n < 20:
+            return {}, "NEUTRAL"
+
+        h = highs[-n:]
+        l = lows[-n:]
+        c = closes[-n:]
+
+        trend_high = max(h)
+        trend_low = min(l)
+        high_idx = h.index(trend_high)
+        low_idx = l.index(trend_low)
+
+        if trend_high <= trend_low:
+            return {}, "NEUTRAL"
+
+        diff = trend_high - trend_low
+
+        # Determine trend direction: if high came after low = uptrend, else downtrend
+        if high_idx > low_idx:
+            # Uptrend: retracement from high
+            trend = "UP"
+            fib = {
+                "0.0": trend_high,
+                "0.236": trend_high - diff * 0.236,
+                "0.382": trend_high - diff * 0.382,
+                "0.5": trend_high - diff * 0.5,
+                "0.618": trend_high - diff * 0.618,
+                "0.786": trend_high - diff * 0.786,
+                "1.0": trend_low,
+                # Extensions (above high)
+                "ext_1.272": trend_high + diff * 0.272,
+                "ext_1.618": trend_high + diff * 0.618,
+                "ext_2.0": trend_high + diff * 1.0,
+            }
+        else:
+            # Downtrend: retracement from low
+            trend = "DOWN"
+            fib = {
+                "0.0": trend_low,
+                "0.236": trend_low + diff * 0.236,
+                "0.382": trend_low + diff * 0.382,
+                "0.5": trend_low + diff * 0.5,
+                "0.618": trend_low + diff * 0.618,
+                "0.786": trend_low + diff * 0.786,
+                "1.0": trend_high,
+                # Extensions (below low)
+                "ext_1.272": trend_low - diff * 0.272,
+                "ext_1.618": trend_low - diff * 0.618,
+                "ext_2.0": trend_low - diff * 1.0,
+            }
+
+        return fib, trend
+
+    @staticmethod
+    def _find_swing_points(
+        highs: list[float],
+        lows: list[float],
+        lookback: int = 50,
+    ) -> tuple[float, float]:
+        """Find most recent significant swing high and swing low.
+
+        Uses ±5 bar confirmation for daily timeframe (more significant pivots).
+        """
+        n = min(lookback, len(highs))
+        if n < 12:
+            return max(highs[-n:]) if highs else 0.0, min(lows[-n:]) if lows else 0.0
+
+        h = highs[-n:]
+        l = lows[-n:]
+        window = 5  # larger window for daily = more significant pivots
+
+        swing_high = 0.0
+        swing_low = float("inf")
+
+        for i in range(window, n - window):
+            if all(h[i] >= h[i-j] for j in range(1, window+1)) and \
+               all(h[i] >= h[i+j] for j in range(1, min(window+1, n-i))):
+                swing_high = h[i]  # most recent wins
+            if all(l[i] <= l[i-j] for j in range(1, window+1)) and \
+               all(l[i] <= l[i+j] for j in range(1, min(window+1, n-i))):
+                swing_low = l[i]
+
+        if swing_high == 0.0:
+            swing_high = max(h)
+        if swing_low == float("inf"):
+            swing_low = min(l)
+
+        return swing_high, swing_low
+
+    def compute_position_indicators(self, klines: list[dict[str, Any]]) -> Indicators:
+        """Compute indicators optimized for position trading (daily timeframe).
+
+        Extends standard indicators with S/R levels, Fibonacci, EMA200, and swing structure.
+        """
+        # Start with standard indicators
+        ind = self.compute_indicators(klines)
+        if not ind.valid:
+            return ind
+
+        # Extract OHLCV
+        closes: list[float] = []
+        highs: list[float] = []
+        lows: list[float] = []
+        for k in klines:
+            try:
+                c = float(k.get("close", k.get("c", 0)))
+                h = float(k.get("high", k.get("h", 0)))
+                l_val = float(k.get("low", k.get("l", 0)))
+                if c > 0 and h > 0 and l_val > 0:
+                    closes.append(c)
+                    highs.append(h)
+                    lows.append(l_val)
+            except (ValueError, TypeError):
+                continue
+
+        if len(closes) < 50:
+            return ind
+
+        # ── Support/Resistance ──
+        sr_lookback = getattr(self.cfg, "position_sr_lookback", 100)
+        sr_tol = getattr(self.cfg, "position_sr_tolerance_pct", 0.5)
+        sr_min_touches = getattr(self.cfg, "position_sr_touch_count", 3)
+        supports, resistances = self._compute_support_resistance(
+            highs, lows, closes, sr_lookback, sr_tol, sr_min_touches,
+        )
+        ind.support_levels = supports
+        ind.resistance_levels = resistances
+
+        # ── Fibonacci ──
+        if getattr(self.cfg, "position_fib_enabled", True):
+            fib_levels, fib_trend = self._compute_fibonacci_levels(
+                highs, lows, closes, sr_lookback,
+            )
+            ind.fib_levels = fib_levels
+            ind.fib_trend = fib_trend
+
+        # ── Swing Points ──
+        ind.swing_high, ind.swing_low = self._find_swing_points(highs, lows, 50)
+        ind.trend_high = max(highs[-sr_lookback:]) if len(highs) >= sr_lookback else max(highs)
+        ind.trend_low = min(lows[-sr_lookback:]) if len(lows) >= sr_lookback else min(lows)
+
+        # ── EMA 200 ──
+        if len(closes) >= 200:
+            ind.ema_200 = self._compute_ema_single(closes, 200)
+        elif len(closes) >= 100:
+            ind.ema_200 = self._compute_ema_single(closes, len(closes))
+
+        current_price = closes[-1]
+        if ind.ema_200 > 0:
+            if current_price > ind.ema_200 * 1.005:
+                ind.price_vs_ema200 = "ABOVE"
+            elif current_price < ind.ema_200 * 0.995:
+                ind.price_vs_ema200 = "BELOW"
+
+        return ind
+
     # ── Running EMA (per-tick, for z-score) ────────────────────
 
     def update_ema(self, symbol: str, price: float) -> tuple[float, float, float]:
@@ -1349,6 +1594,127 @@ class MarketData:
             async with sem:
                 return await self.snapshot_symbol_swing(
                     sym, swing_interval, swing_limit, trend_interval, trend_limit,
+                )
+
+        tasks = [_fetch(s) for s in symbols]
+        raw = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in raw:
+            if isinstance(r, SymbolSnapshot):
+                results.append(r)
+        return results
+
+    async def snapshot_symbol_position(
+        self,
+        symbol: str,
+        position_interval: str = "1d",
+        position_limit: int = 200,
+        trend_interval: str = "1w",
+        trend_limit: int = 50,
+    ) -> SymbolSnapshot:
+        """Snapshot using daily klines + weekly trend for position trading.
+
+        Uses compute_position_indicators for S/R, Fibonacci, EMA200.
+        """
+        snap = SymbolSnapshot(symbol=symbol)
+        snap.ts = datetime.now(timezone.utc).isoformat()
+
+        tasks = [
+            self.fetch_depth(symbol),
+            self.fetch_premium_index(symbol),
+            self.fetch_klines_custom(symbol, position_interval, position_limit),
+            self.fetch_klines_custom(symbol, trend_interval, trend_limit),
+        ]
+        if self.cfg.use_open_interest:
+            tasks.append(self.fetch_open_interest(symbol))
+        if self.cfg.use_sentiment:
+            tasks.append(self.fetch_fear_greed())
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Depth
+        depth = results[0] if not isinstance(results[0], Exception) else DepthSnapshot()
+        if isinstance(depth, DepthSnapshot):
+            snap.best_bid = depth.best_bid
+            snap.best_ask = depth.best_ask
+            snap.spread_bps = depth.spread_bps
+            snap.bid_depth_usdt = depth.bid_depth_usdt
+            snap.ask_depth_usdt = depth.ask_depth_usdt
+            snap.mid_price = depth.mid_price
+            snap.imbalance_ratio = depth.imbalance_ratio
+            snap.whale_bid_usdt = depth.whale_bid_usdt
+            snap.whale_ask_usdt = depth.whale_ask_usdt
+            snap.whale_imbalance = depth.whale_imbalance
+
+        # Mark price + funding
+        premium = results[1]
+        if not isinstance(premium, Exception) and isinstance(premium, dict):
+            try:
+                snap.mark_price = float(premium.get("markPrice", 0))
+            except ValueError:
+                snap.mark_price = 0.0
+            try:
+                snap.funding_rate = float(premium.get("lastFundingRate", 0))
+            except ValueError:
+                snap.funding_rate = 0.0
+
+        # Daily klines -> position indicators (with S/R, Fibonacci, EMA200)
+        klines = results[2]
+        if not isinstance(klines, Exception) and isinstance(klines, list):
+            snap.indicators = self.compute_position_indicators(klines)
+
+        # Weekly trend
+        trend_klines = results[3]
+        if not isinstance(trend_klines, Exception) and isinstance(trend_klines, list):
+            trend_ind = self.compute_indicators(trend_klines)
+            snap.indicators.higher_tf_trend = trend_ind.trend_direction
+
+        # Open Interest
+        idx = 4
+        if self.cfg.use_open_interest:
+            oi_result = results[idx] if idx < len(results) else None
+            if not isinstance(oi_result, Exception) and isinstance(oi_result, tuple):
+                snap.indicators.open_interest = oi_result[0]
+                snap.indicators.oi_change_pct = oi_result[1]
+                _detect_liquidation_cascade(snap.indicators)
+            idx += 1
+
+        # Fear & Greed
+        if self.cfg.use_sentiment:
+            fg_result = results[idx] if idx < len(results) else 50.0
+            fg_val = fg_result if isinstance(fg_result, float) else 50.0
+            snap.indicators.fear_greed_index = fg_val
+            snap.indicators.composite_sentiment = _compute_composite_sentiment(
+                funding_rate=snap.funding_rate,
+                oi_change_pct=snap.indicators.oi_change_pct,
+                taker_buy_ratio=snap.indicators.taker_buy_ratio,
+                fear_greed=fg_val,
+                volume_ratio=snap.indicators.volume_ratio,
+            )
+
+        # EMA from daily klines
+        if snap.indicators.valid and snap.indicators.kline_fast_ema > 0:
+            snap.fast_ema = snap.indicators.kline_fast_ema
+            snap.slow_ema = snap.indicators.kline_slow_ema
+            snap.z_score_bps = snap.indicators.kline_z_score_bps
+
+        return snap
+
+    async def batch_snapshots_position(
+        self,
+        symbols: list[str],
+        position_interval: str = "1d",
+        position_limit: int = 200,
+        trend_interval: str = "1w",
+        trend_limit: int = 50,
+        concurrency: int = 2,
+    ) -> list[SymbolSnapshot]:
+        """Fetch position snapshots with low concurrency (heavy: 200 daily candles)."""
+        sem = asyncio.Semaphore(concurrency)
+        results: list[SymbolSnapshot] = []
+
+        async def _fetch(sym: str) -> SymbolSnapshot:
+            async with sem:
+                return await self.snapshot_symbol_position(
+                    sym, position_interval, position_limit, trend_interval, trend_limit,
                 )
 
         tasks = [_fetch(s) for s in symbols]

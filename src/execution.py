@@ -31,13 +31,147 @@ from src.universe import Universe
 log = get_logger(__name__)
 
 
+def _compute_position_tp_sl(
+    cfg: Settings, snap: SymbolSnapshot, entry_price: float, side: str,
+) -> tuple[float, float]:
+    """Compute TP/SL for position trades using analyst-style S/R and Fibonacci targets.
+
+    Logic (like a real technical analyst):
+    1. For LONG: SL = nearest strong support below entry (with buffer)
+                 TP = nearest strong resistance above entry (with buffer)
+    2. For SHORT: SL = nearest strong resistance above entry (with buffer)
+                  TP = nearest strong support below entry (with buffer)
+    3. Fibonacci levels are used as secondary confirmation/targets
+    4. If no S/R found, fall back to Fibonacci levels
+    5. If nothing found, use fallback fixed bps
+
+    Returns (sl_bps, tp_bps).
+    """
+    ind = snap.indicators
+    use_dynamic = getattr(cfg, "position_use_dynamic_targets", True)
+
+    if not use_dynamic or entry_price <= 0:
+        return cfg.position_fallback_sl_bps, cfg.position_fallback_tp_bps
+
+    sl_price = 0.0
+    tp_price = 0.0
+
+    supports = ind.support_levels    # [(price, strength)] nearest first (descending)
+    resistances = ind.resistance_levels  # [(price, strength)] nearest first (ascending)
+    fib = ind.fib_levels
+    sl_buffer = cfg.position_sl_buffer_pct / 100.0
+    tp_buffer = cfg.position_tp_buffer_pct / 100.0
+
+    if side == "LONG":
+        # SL: nearest strong support below entry
+        if supports:
+            # Prefer strongest support among top 3 nearest
+            candidates = supports[:3]
+            best_support = max(candidates, key=lambda x: x[1])  # most touches
+            sl_price = best_support[0] * (1 - sl_buffer)  # buffer below support
+
+        # TP: nearest strong resistance above entry
+        if resistances:
+            candidates = resistances[:3]
+            best_resistance = max(candidates, key=lambda x: x[1])
+            tp_price = best_resistance[0] * (1 - tp_buffer)  # buffer inside resistance
+
+        # Fibonacci fallback/confirmation
+        if fib and (sl_price <= 0 or tp_price <= 0):
+            if sl_price <= 0:
+                # Use Fibonacci support levels below entry
+                fib_supports = [v for k, v in fib.items()
+                                if not k.startswith("ext_") and v < entry_price and v > 0]
+                if fib_supports:
+                    sl_price = max(fib_supports) * (1 - sl_buffer)  # nearest fib below
+            if tp_price <= 0:
+                # Use Fibonacci extension levels above entry
+                fib_targets = [v for k, v in fib.items()
+                               if (k.startswith("ext_") or v > entry_price) and v > entry_price]
+                if fib_targets:
+                    tp_price = min(fib_targets) * (1 - tp_buffer)  # nearest target above
+
+    else:  # SHORT
+        # SL: nearest strong resistance above entry
+        if resistances:
+            candidates = resistances[:3]
+            best_resistance = max(candidates, key=lambda x: x[1])
+            sl_price = best_resistance[0] * (1 + sl_buffer)
+
+        # TP: nearest strong support below entry
+        if supports:
+            candidates = supports[:3]
+            best_support = max(candidates, key=lambda x: x[1])
+            tp_price = best_support[0] * (1 + tp_buffer)
+
+        # Fibonacci fallback
+        if fib and (sl_price <= 0 or tp_price <= 0):
+            if sl_price <= 0:
+                fib_resistances = [v for k, v in fib.items()
+                                   if not k.startswith("ext_") and v > entry_price]
+                if fib_resistances:
+                    sl_price = min(fib_resistances) * (1 + sl_buffer)
+            if tp_price <= 0:
+                fib_targets = [v for k, v in fib.items()
+                               if (k.startswith("ext_") or v < entry_price) and v < entry_price and v > 0]
+                if fib_targets:
+                    tp_price = max(fib_targets) * (1 + tp_buffer)
+
+    # Convert to bps
+    if sl_price > 0:
+        sl_bps = abs(entry_price - sl_price) / entry_price * 10_000
+    else:
+        sl_bps = cfg.position_fallback_sl_bps
+
+    if tp_price > 0:
+        tp_bps = abs(tp_price - entry_price) / entry_price * 10_000
+    else:
+        tp_bps = cfg.position_fallback_tp_bps
+
+    # Apply limits
+    sl_bps = max(cfg.position_min_sl_bps, min(sl_bps, cfg.position_max_sl_bps))
+    tp_bps = max(cfg.position_min_tp_bps, tp_bps)
+
+    # Enforce minimum R:R ratio
+    min_rr = cfg.position_min_rr_ratio
+    if sl_bps > 0 and tp_bps / sl_bps < min_rr:
+        tp_bps = sl_bps * min_rr
+
+    # Floor TP for fees
+    round_trip_fee_bps = 2.0 * cfg.fee_rate_bps
+    tp_floor = round_trip_fee_bps + getattr(cfg, "min_tp_net_bps", 10.0)
+    tp_bps = max(tp_bps, tp_floor)
+
+    log.info(
+        "position dynamic TP/SL computed",
+        extra={
+            "side": side,
+            "entry": entry_price,
+            "sl_price": round(sl_price, 4) if sl_price > 0 else "fallback",
+            "tp_price": round(tp_price, 4) if tp_price > 0 else "fallback",
+            "sl_bps": round(sl_bps, 1),
+            "tp_bps": round(tp_bps, 1),
+            "rr_ratio": round(tp_bps / sl_bps, 2) if sl_bps > 0 else 0,
+            "supports": len(supports),
+            "resistances": len(resistances),
+            "fib_levels": len(fib),
+        },
+    )
+    return sl_bps, tp_bps
+
+
 def _compute_tp_sl_bps(
     cfg: Settings, snap: SymbolSnapshot, entry_price: float,
     trade_type: str = "scalp",
+    side: str = "",
 ) -> tuple[float, float]:
-    """Compute SL/TP bps (ATR-based when enabled). Swing uses wider values.
-    TP is floored so that after fees we have at least min_tp_net_bps net profit.
+    """Compute SL/TP bps. Position trades use analyst-style S/R targets.
+    Swing/Scalp use ATR-based values. TP is floored for net profit after fees.
     """
+    # Position trades: analyst-style dynamic targets based on S/R and Fibonacci
+    if trade_type == "position" and side:
+        return _compute_position_tp_sl(cfg, snap, entry_price, side)
+
     is_swing = trade_type == "swing"
     base_sl = cfg.swing_sl_bps if is_swing else cfg.sl_bps
     base_tp = cfg.swing_tp_bps if is_swing else cfg.tp_bps
@@ -248,7 +382,7 @@ class PaperExecution(ExecutionAdapter):
         )
 
         # ── Compute SL / TP prices ──────────────────────────────
-        sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, fill_price, getattr(signal, "trade_type", "scalp"))
+        sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, fill_price, getattr(signal, "trade_type", "scalp"), side=signal.side)
         if signal.side == "LONG":
             sl_price = fill_price * (1 - sl_bps / 10_000)
             tp_price = fill_price * (1 + tp_bps / 10_000)
@@ -374,7 +508,8 @@ class PaperExecution(ExecutionAdapter):
                 "is_paper": 1,
                 "trade_type": getattr(signal, "trade_type", "scalp"),
                 "max_hold_minutes": (
-                    self.cfg.swing_max_hold_minutes if getattr(signal, "trade_type", "scalp") == "swing"
+                    self.cfg.position_max_hold_minutes if getattr(signal, "trade_type", "scalp") == "position"
+                    else self.cfg.swing_max_hold_minutes if getattr(signal, "trade_type", "scalp") == "swing"
                     else self.cfg.max_hold_minutes
                 ),
             },
@@ -991,7 +1126,7 @@ class LiveExecution(ExecutionAdapter):
         notional = avg_price * filled_qty
         close_side = "SELL" if signal.side == "LONG" else "BUY"
 
-        sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, avg_price, getattr(signal, "trade_type", "scalp"))
+        sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, avg_price, getattr(signal, "trade_type", "scalp"), side=signal.side)
         if signal.side == "LONG":
             sl_price = avg_price * (1 - sl_bps / 10_000)
             tp_price = avg_price * (1 + tp_bps / 10_000)
@@ -1201,7 +1336,8 @@ class LiveExecution(ExecutionAdapter):
                 "is_paper": 0,
                 "trade_type": getattr(signal, "trade_type", "scalp"),
                 "max_hold_minutes": (
-                    self.cfg.swing_max_hold_minutes if getattr(signal, "trade_type", "scalp") == "swing"
+                    self.cfg.position_max_hold_minutes if getattr(signal, "trade_type", "scalp") == "position"
+                    else self.cfg.swing_max_hold_minutes if getattr(signal, "trade_type", "scalp") == "swing"
                     else self.cfg.max_hold_minutes
                 ),
             },
