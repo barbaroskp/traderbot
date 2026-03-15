@@ -240,8 +240,9 @@ class TestMomentumConfirmation:
 
 
 class TestModeAwareEmaGate:
-    def test_mean_reversion_still_requires_ema(self, strategy_cfg, db) -> None:
-        """Default behavior: mean-reversion keeps EMA anchor."""
+    def test_mean_reversion_requires_ema_when_enabled(self, strategy_cfg, db) -> None:
+        """When require_ema_in_confluence=True, mean-reversion requires EMA anchor."""
+        strategy_cfg.require_ema_in_confluence = True  # explicitly enable
         strategy_cfg.require_momentum_confirmation = False
         strat = Strategy(strategy_cfg, db)
         snaps = [_make_snap(
@@ -261,6 +262,7 @@ class TestModeAwareEmaGate:
         """When configured, TREND_FOLLOW accepts non-EMA confluence if strong enough."""
         strategy_cfg.require_ema_in_confluence = True
         strategy_cfg.require_ema_in_trend_follow = False
+        strategy_cfg.use_regime_filter = True  # enable regime filter for TREND_FOLLOW mode
         strategy_cfg.min_confluence_no_ema = 3
         strategy_cfg.min_weighted_score_no_ema = 40
         strategy_cfg.require_momentum_confirmation = True
@@ -273,7 +275,7 @@ class TestModeAwareEmaGate:
             macd_hist_prev=0.001,
             bb_pct=0.1,
             trend="UP",
-            adx=35,  # TREND_FOLLOW mode
+            adx=35,  # TREND_FOLLOW mode (needs use_regime_filter=True)
             macd_strengthening=True,
         )]
         signals = strat.generate_signals(snaps, [])
@@ -284,6 +286,7 @@ class TestModeAwareEmaGate:
     def test_trend_follow_blocks_without_ema_when_override_true(self, strategy_cfg, db) -> None:
         strategy_cfg.require_ema_in_confluence = True
         strategy_cfg.require_ema_in_trend_follow = True
+        strategy_cfg.use_regime_filter = True
         strategy_cfg.require_momentum_confirmation = False
         strat = Strategy(strategy_cfg, db)
         snaps = [_make_snap(
@@ -571,3 +574,81 @@ class TestSwingSignals:
         signals = strat.generate_signals([snap], [])
         if signals:
             assert signals[0].trade_type == "scalp"
+
+
+class TestClusterVoting:
+    """Cluster-based confluence: 22 indicators grouped into 7 clusters."""
+
+    def test_redundant_oscillators_count_as_one_cluster(self, strategy_cfg, db) -> None:
+        """RSI + StochRSI + WillR all oversold should produce 1 cluster vote, not 3."""
+        strategy_cfg.require_momentum_confirmation = False
+        strategy_cfg.require_ema_in_confluence = False
+        strat = Strategy(strategy_cfg, db)
+        snap = _make_snap("BTC-USDT", z=-35, rsi=20, bb_pct=0.5, trend="NEUTRAL")
+        snap.indicators.stoch_rsi_k = 10.0
+        snap.indicators.stoch_rsi_d = 10.0
+        snap.indicators.williams_r = -90.0
+        votes = strat._compute_votes(snap)
+        clusters, _ = strat._compute_cluster_votes(votes)
+        osc_clusters = [c for c in clusters if c.name == "oscillator"]
+        assert len(osc_clusters) == 1  # only 1 cluster vote
+        assert osc_clusters[0].side == "LONG"
+        assert osc_clusters[0].agreement >= 2  # internal consensus
+
+    def test_two_clusters_needed_for_signal(self, strategy_cfg, db) -> None:
+        """With only 1 cluster voting, signal should be rejected."""
+        strategy_cfg.require_momentum_confirmation = False
+        strategy_cfg.require_ema_in_confluence = False
+        strategy_cfg.min_cluster_confluence = 2
+        strat = Strategy(strategy_cfg, db)
+        # Only RSI oversold → oscillator cluster only
+        snap = _make_snap("BTC-USDT", z=0, rsi=20, macd_hist=0.0, bb_pct=0.5, trend="NEUTRAL")
+        signals = strat.generate_signals([snap], [])
+        assert len(signals) == 0
+
+    def test_multiple_clusters_produce_signal(self, strategy_cfg, db) -> None:
+        """When 3+ clusters agree, signal should be accepted."""
+        strategy_cfg.require_momentum_confirmation = False
+        strat = Strategy(strategy_cfg, db)
+        # trend cluster (ema LONG + trend UP + adx), oscillator (rsi oversold),
+        # momentum (macd bullish crossover), volatility (bb near lower band)
+        snap = _make_snap(
+            "BTC-USDT", z=-35, rsi=25,
+            macd_hist=0.001, macd_hist_prev=-0.001,
+            bb_pct=0.1, trend="UP", adx=30.0,
+        )
+        signals = strat.generate_signals([snap], [])
+        assert len(signals) == 1
+        sig = signals[0]
+        assert sig.side == "LONG"
+        assert len(sig.cluster_votes) >= 2
+
+    def test_contrarian_cluster_is_bonus_only(self, strategy_cfg, db) -> None:
+        """Contrarian cluster (OI, sentiment, liq_cascade) should not count as a vote."""
+        strategy_cfg.require_momentum_confirmation = False
+        strat = Strategy(strategy_cfg, db)
+        snap = _make_snap("BTC-USDT", z=-35, rsi=25, macd_hist=0.001,
+                          macd_hist_prev=-0.001, bb_pct=0.1, trend="UP")
+        # Set contrarian indicators
+        snap.indicators.composite_sentiment = 50.0
+        snap.indicators.oi_change_pct = 5.0
+        snap.indicators.price_velocity_bps = 30.0
+        votes = strat._compute_votes(snap)
+        clusters, contra_bonus = strat._compute_cluster_votes(votes)
+        # No cluster named "contrarian" in the voting clusters
+        contrarian_clusters = [c for c in clusters if c.name == "contrarian"]
+        assert len(contrarian_clusters) == 0
+        # But bonus should be non-zero
+        assert contra_bonus != 0.0
+
+    def test_partial_weight_not_enough_for_solo_cluster(self, strategy_cfg, db) -> None:
+        """A partial-weight RSI 'leaning' vote should not activate oscillator cluster alone."""
+        strategy_cfg.require_momentum_confirmation = False
+        strategy_cfg.require_ema_in_confluence = False
+        strat = Strategy(strategy_cfg, db)
+        # RSI=37 → "leaning oversold" at 30% weight → too weak for solo cluster
+        snap = _make_snap("BTC-USDT", z=-35, rsi=37, macd_hist=0.0, bb_pct=0.5, trend="NEUTRAL")
+        votes = strat._compute_votes(snap)
+        clusters, _ = strat._compute_cluster_votes(votes)
+        osc_clusters = [c for c in clusters if c.name == "oscillator"]
+        assert len(osc_clusters) == 0  # partial vote filtered out

@@ -129,6 +129,11 @@ class Scheduler:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._shutdown)
 
+        # ── Cleanup orphaned PENDING orders from previous runs ───
+        # Orders stuck as PENDING with no matching OPEN position cause
+        # cancel_stale_orders to spam the exchange API every cycle.
+        self._cleanup_orphaned_orders()
+
         # ── Initial universe load ───────────────────────────────
         await self._safe_universe_refresh()
 
@@ -298,7 +303,8 @@ class Scheduler:
                 if is_high_conviction:
                     qty = qty * self.cfg.high_conviction_margin_multiplier
                     # Cap by max margin for high conviction (margin cap, not notional)
-                    max_notional_high = self.cfg.max_margin_high_conviction_usdt * final_leverage
+                    hc_balance = self.portfolio.balance or self.cfg.initial_capital_usdt
+                    max_notional_high = hc_balance * self.cfg.max_margin_high_conviction_pct * final_leverage
                     max_qty_high = max_notional_high / snap.mid_price
                     qty = min(qty, max_qty_high)
                     log.info(
@@ -325,8 +331,8 @@ class Scheduler:
                 round_trip_fee_bps = 2.0 * self.cfg.fee_rate_bps
                 net_tp_bps = tp_bps - round_trip_fee_bps
                 net_sl_bps = sl_bps + round_trip_fee_bps
-                # Need net_tp / net_sl > 1.5 for profitable trading (was 1.0 – just breakeven)
-                if net_tp_bps <= 0 or (net_sl_bps > 0 and net_tp_bps / net_sl_bps < 1.5):
+                # Need net_tp / net_sl > 1.0 for positive expectancy (1.5 cok katiydi, cok sinyal engelliyordu)
+                if net_tp_bps <= 0 or (net_sl_bps > 0 and net_tp_bps / net_sl_bps < 1.0):
                     log.warning(
                         "fee-adjusted expectancy guard: skipping low-expectancy trade",
                         extra={
@@ -426,6 +432,51 @@ class Scheduler:
                 "rate_limit_hits": api_stats["rate_limit_hits"],
             },
         )
+
+    def _cleanup_orphaned_orders(self) -> None:
+        """Mark orphaned PENDING orders as CANCELLED on startup.
+
+        Orders left as PENDING from a previous crash/restart that have no
+        matching OPEN position cause cancel_stale_orders to spam the exchange
+        API every cycle trying to cancel already-gone orders.
+        """
+        try:
+            is_paper = 1 if self.cfg.paper_mode else 0
+            # Get all order IDs referenced by OPEN positions
+            open_positions = self.db.fetch_all(
+                "SELECT sl_order_id, tp_order_id, tp1_order_id FROM positions WHERE status='OPEN' AND is_paper=?",
+                (is_paper,),
+            )
+            protected_oids: set[str] = set()
+            for pos in open_positions:
+                for key in ("sl_order_id", "tp_order_id", "tp1_order_id"):
+                    oid = pos.get(key, "")
+                    if oid:
+                        protected_oids.add(oid)
+
+            # Find all PENDING orders
+            pending = self.db.fetch_all(
+                "SELECT id, client_order_id FROM orders WHERE status='PENDING' AND is_paper=?",
+                (is_paper,),
+            )
+
+            now = datetime.now(timezone.utc).isoformat()
+            orphaned = 0
+            for o in pending:
+                if o["client_order_id"] not in protected_oids:
+                    self.db.execute(
+                        "UPDATE orders SET status='CANCELLED', updated_at=? WHERE id=?",
+                        (now, o["id"]),
+                    )
+                    orphaned += 1
+
+            if orphaned:
+                log.info(
+                    "startup: cleaned orphaned PENDING orders",
+                    extra={"orphaned": orphaned, "protected": len(protected_oids)},
+                )
+        except Exception as exc:
+            log.warning("startup: orphaned order cleanup failed", extra={"error": str(exc)})
 
     async def _safe_universe_refresh(self) -> None:
         """Refresh universe, swallowing errors."""

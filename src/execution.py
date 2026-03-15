@@ -1561,13 +1561,42 @@ class LiveExecution(ExecutionAdapter):
         )
 
     async def cancel_stale_orders(self, max_age_minutes: int = 30) -> int:
-        """Cancel live orders that are stale."""
+        """Cancel live orders that are stale.
+
+        FIX: Previously, failed cancel API calls left DB rows as PENDING,
+        causing infinite cancel spam on every cycle. Now we mark them as
+        CANCELLED in DB regardless of API result (order likely already
+        filled/cancelled on exchange). Also cap at 10 cancels per cycle
+        to avoid API rate limit issues.
+        """
+        # Only cancel orders that are NOT linked to an open position's SL/TP
+        # (those are managed by check_exits). Cancel orphaned stale orders.
         pending = self.db.fetch_all(
             "SELECT * FROM orders WHERE status='PENDING' AND is_paper=0"
         )
         now = datetime.now(timezone.utc)
         cancelled = 0
+        max_cancels_per_cycle = 10  # avoid API rate limit spam
+
+        # Collect SL/TP order IDs for currently open positions so we don't cancel them
+        open_positions = self.db.fetch_all(
+            "SELECT sl_order_id, tp_order_id, tp1_order_id FROM positions WHERE status='OPEN' AND is_paper=0"
+        )
+        protected_oids: set[str] = set()
+        for pos in open_positions:
+            for key in ("sl_order_id", "tp_order_id", "tp1_order_id"):
+                oid = pos.get(key, "")
+                if oid:
+                    protected_oids.add(oid)
+
         for o in pending:
+            if cancelled >= max_cancels_per_cycle:
+                break
+
+            # Don't cancel SL/TP orders for open positions
+            if o["client_order_id"] in protected_oids:
+                continue
+
             ts = datetime.fromisoformat(o["ts"])
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
@@ -1576,13 +1605,18 @@ class LiveExecution(ExecutionAdapter):
                     await self.client.cancel_order(
                         o["symbol"], client_order_id=o["client_order_id"]
                     )
-                    self.db.execute(
-                        "UPDATE orders SET status='CANCELLED', updated_at=? WHERE id=?",
-                        (now.isoformat(), o["id"]),
+                except BingXClientError as exc:
+                    # Order likely already filled/cancelled on exchange - that's fine
+                    log.debug(
+                        "stale order cancel failed (likely already gone)",
+                        extra={"oid": o["client_order_id"], "error": str(exc)},
                     )
-                    cancelled += 1
-                except BingXClientError:
-                    pass
+                # Always mark as CANCELLED in DB to prevent infinite retry spam
+                self.db.execute(
+                    "UPDATE orders SET status='CANCELLED', updated_at=? WHERE id=?",
+                    (now.isoformat(), o["id"]),
+                )
+                cancelled += 1
         return cancelled
 
     @staticmethod

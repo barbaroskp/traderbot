@@ -1,7 +1,10 @@
-"""Multi-indicator confluence strategy – optimized for maximum profitability.
+"""Multi-indicator cluster confluence strategy.
 
-Signal generation uses 22 independent indicators that each "vote" for LONG, SHORT, or NEUTRAL.
-A trade is only taken when enough indicators agree (confluence).
+Signal generation uses 22 indicators grouped into 7 clusters.  Each cluster
+requires internal consensus (2+ members agreeing) before casting a single
+cluster vote.  A trade is taken when enough *clusters* agree (default 2/6).
+This prevents redundant indicators (RSI/StochRSI/WillR) from inflating
+confluence and ensures each vote represents a genuinely different data source.
 
 Indicators:
   1. EMA Z-Score: Mean-reversion signal based on price deviation from fast EMA (kline-based)
@@ -60,6 +63,36 @@ class IndicatorVote:
 
 
 @dataclass
+class ClusterVote:
+    """A cluster's aggregated vote — requires internal consensus."""
+    name: str
+    side: str  # LONG, SHORT, NEUTRAL
+    weight: float = 0.0
+    member_votes: list[IndicatorVote] = field(default_factory=list)
+    agreement: int = 0  # how many members agreed
+    total_members: int = 0  # how many members voted non-neutral
+    reason: str = ""
+
+
+# ── Cluster definitions ───────────────────────────────────────────────
+# Each cluster groups indicators that measure the same underlying concept.
+# A cluster votes only when enough internal members agree (2/3 or 2/2).
+# This prevents redundant indicators from inflating confluence.
+CLUSTER_MEMBERS: dict[str, list[str]] = {
+    "oscillator":  ["rsi", "stoch_rsi", "williams_r", "rsi_divergence"],  # overbought/oversold
+    "momentum":    ["macd", "obv", "momentum", "velocity"],               # momentum/volume flow
+    "trend":       ["ema_zscore", "trend", "adx"],                        # direction/strength
+    "volatility":  ["bollinger", "squeeze", "breakout", "volume_spike"],  # vol regime/breakout
+    "orderflow":   ["orderbook", "taker_ratio", "whale"],                 # market depth
+    "contrarian":  ["open_interest", "liq_cascade", "sentiment"],         # contra signals (bonus only)
+    "vwap":        ["vwap", "volume_profile"],                            # institutional levels
+}
+
+# Contrarian cluster doesn't vote independently — it adds bonus/penalty
+BONUS_ONLY_CLUSTERS = {"contrarian"}
+
+
+@dataclass
 class Signal:
     """A trading signal with confluence details."""
     symbol: str
@@ -95,6 +128,7 @@ class Signal:
     momentum_confirmed: bool = False
     vwap_deviation_bps: float = 0.0
     trade_type: str = "scalp"  # "scalp" or "swing"
+    cluster_votes: list[ClusterVote] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.ts:
@@ -217,15 +251,27 @@ class Strategy:
         mode = self._determine_mode(indicators)
         votes = self._compute_votes(snap)
 
-        # Count agreeing indicators per side
-        long_votes = [v for v in votes if v.side == "LONG"]
-        short_votes = [v for v in votes if v.side == "SHORT"]
-        long_score = len(long_votes)
-        short_score = len(short_votes)
-        long_weighted = sum(v.weight for v in long_votes)
-        short_weighted = sum(v.weight for v in short_votes)
+        # ── Cluster-based confluence ──────────────────────────
+        # Group 22 individual votes into 6 voting clusters + 1 bonus cluster.
+        # This prevents redundant indicators (RSI/StochRSI/WillR) from
+        # inflating confluence count.  Each cluster = 1 vote max.
+        cluster_votes, contrarian_bonus = self._compute_cluster_votes(votes)
 
-        # Pre-compute momentum for both sides so it influences confluence
+        # Count cluster votes per side
+        long_clusters = [c for c in cluster_votes if c.side == "LONG"]
+        short_clusters = [c for c in cluster_votes if c.side == "SHORT"]
+        long_cluster_count = len(long_clusters)
+        short_cluster_count = len(short_clusters)
+        long_weighted = sum(c.weight for c in long_clusters)
+        short_weighted = sum(c.weight for c in short_clusters)
+
+        # Apply contrarian bonus to the side it favors
+        if contrarian_bonus > 0:
+            long_weighted += contrarian_bonus
+        elif contrarian_bonus < 0:
+            short_weighted += abs(contrarian_bonus)
+
+        # Pre-compute momentum for both sides
         long_momentum = self._check_momentum(indicators, "LONG")
         short_momentum = self._check_momentum(indicators, "SHORT")
         if self.cfg.require_momentum_confirmation and indicators.valid:
@@ -239,38 +285,38 @@ class Strategy:
         require_ema = self._require_ema_for_mode(mode)
         ema_vote = next((v for v in votes if v.name == "ema_zscore"), None)
 
+        # Cluster confluence threshold (default 2 out of 6 voting clusters)
+        min_cluster_confluence = getattr(self.cfg, "min_cluster_confluence", 2)
+
         if require_ema:
             if not ema_vote or ema_vote.side == "NEUTRAL":
                 return None
-            # EMA voted LONG or SHORT; need at least one other indicator agreeing
-            if ema_vote.side == "LONG" and long_score >= 2 and long_weighted > short_weighted:
+            # EMA is part of the trend cluster; check cluster confluence
+            if (ema_vote.side == "LONG" and long_cluster_count >= min_cluster_confluence
+                    and long_weighted > short_weighted):
                 side = "LONG"
-                confluence_score = long_score
+                confluence_score = long_cluster_count
                 weighted_score = long_weighted
-            elif ema_vote.side == "SHORT" and short_score >= 2 and short_weighted > long_weighted:
+            elif (ema_vote.side == "SHORT" and short_cluster_count >= min_cluster_confluence
+                    and short_weighted > long_weighted):
                 side = "SHORT"
-                confluence_score = short_score
+                confluence_score = short_cluster_count
+                weighted_score = short_weighted
+            else:
+                return None
+        else:
+            if long_cluster_count >= min_cluster_confluence and long_weighted > short_weighted:
+                side = "LONG"
+                confluence_score = long_cluster_count
+                weighted_score = long_weighted
+            elif short_cluster_count >= min_cluster_confluence and short_weighted > long_weighted:
+                side = "SHORT"
+                confluence_score = short_cluster_count
                 weighted_score = short_weighted
             else:
                 return None
 
-        effective_min_confluence = (
-            2
-            if require_ema
-            else max(min_confluence, getattr(self.cfg, "min_confluence_no_ema", 3))
-        )
-
-        if not require_ema:
-            if long_score >= effective_min_confluence and long_weighted > short_weighted:
-                side = "LONG"
-                confluence_score = long_score
-                weighted_score = long_weighted
-            elif short_score >= effective_min_confluence and short_weighted > long_weighted:
-                side = "SHORT"
-                confluence_score = short_score
-                weighted_score = short_weighted
-            else:
-                return None
+        effective_min_confluence = min_cluster_confluence
 
         min_depth = min(snap.bid_depth_usdt, snap.ask_depth_usdt)
         breakout_up = (
@@ -340,6 +386,7 @@ class Strategy:
             mode=mode,
             momentum_confirmed=momentum_confirmed,
             vwap_deviation_bps=indicators.vwap_deviation_bps,
+            cluster_votes=cluster_votes,
         )
 
         # ── Rejection checks ───────────────────────────────────
@@ -1054,6 +1101,94 @@ class Strategy:
 
         return votes
 
+    def _compute_cluster_votes(
+        self, votes: list[IndicatorVote],
+    ) -> tuple[list[ClusterVote], float]:
+        """Group individual indicator votes into clusters.
+
+        A cluster votes for a side when at least 2 members agree (or 1/1 for
+        single-member clusters like vwap).  The contrarian cluster doesn't
+        produce a vote — it produces a bonus/penalty modifier instead.
+
+        Returns (cluster_votes, contrarian_bonus_weight).
+        contrarian_bonus_weight is positive for LONG-leaning, negative for SHORT.
+        """
+        # Index individual votes by name for quick lookup
+        vote_map: dict[str, IndicatorVote] = {}
+        for v in votes:
+            # Some indicators might not appear (didn't trigger) — that's fine
+            vote_map[v.name] = v
+
+        cluster_votes: list[ClusterVote] = []
+        contrarian_bonus = 0.0
+
+        for cluster_name, members in CLUSTER_MEMBERS.items():
+            # Gather non-neutral votes from cluster members
+            member_votes = []
+            for m in members:
+                v = vote_map.get(m)
+                if v and v.side != "NEUTRAL":
+                    member_votes.append(v)
+
+            if not member_votes:
+                continue
+
+            # Filter out very weak partial votes (< 50% of their base weight)
+            # so a "leaning oversold" RSI at 0.3x weight can't activate a cluster alone
+            strong_member_votes = []
+            for mv in member_votes:
+                attr = self._INDICATOR_WEIGHT_ATTRS.get(mv.name)
+                base_w = getattr(self.cfg, attr, 0.0) if attr else mv.weight
+                # Accept if weight >= 40% of base (allows crossover boost, half-weight zones)
+                if base_w > 0 and mv.weight >= base_w * 0.4:
+                    strong_member_votes.append(mv)
+
+            if not strong_member_votes:
+                continue
+
+            # Count votes per side
+            long_members = [v for v in strong_member_votes if v.side == "LONG"]
+            short_members = [v for v in strong_member_votes if v.side == "SHORT"]
+
+            # Determine consensus: need 2+ agreeing, or 1/1 if only 1 voted
+            total_active = len(strong_member_votes)
+            min_agree = 2 if total_active >= 2 else 1
+
+            winning_side = "NEUTRAL"
+            winning_members: list[IndicatorVote] = []
+
+            if len(long_members) >= min_agree and len(long_members) > len(short_members):
+                winning_side = "LONG"
+                winning_members = long_members
+            elif len(short_members) >= min_agree and len(short_members) > len(long_members):
+                winning_side = "SHORT"
+                winning_members = short_members
+
+            if winning_side == "NEUTRAL":
+                continue
+
+            # For contrarian cluster: accumulate as bonus, don't create a vote
+            if cluster_name in BONUS_ONLY_CLUSTERS:
+                bonus_w = sum(v.weight for v in winning_members)
+                contrarian_bonus += bonus_w if winning_side == "LONG" else -bonus_w
+                continue
+
+            # Cluster weight = sum of agreeing member weights
+            cluster_weight = sum(v.weight for v in winning_members)
+            member_names = [v.name for v in winning_members]
+
+            cluster_votes.append(ClusterVote(
+                name=cluster_name,
+                side=winning_side,
+                weight=cluster_weight,
+                member_votes=winning_members,
+                agreement=len(winning_members),
+                total_members=total_active,
+                reason=f"{cluster_name}: {len(winning_members)}/{total_active} agree ({', '.join(member_names)})",
+            ))
+
+        return cluster_votes, contrarian_bonus
+
     def _check_momentum(self, indicators: Indicators, side: str) -> bool:
         """Check if MACD momentum is building in the signal direction."""
         if not indicators.valid:
@@ -1271,15 +1406,17 @@ class Strategy:
                 continue
 
             votes = self._compute_votes(snap)
-            long_votes = [v for v in votes if v.side == "LONG"]
-            short_votes = [v for v in votes if v.side == "SHORT"]
+            cluster_votes_swing, contra_bonus = self._compute_cluster_votes(votes)
+            long_clusters = [c for c in cluster_votes_swing if c.side == "LONG"]
+            short_clusters = [c for c in cluster_votes_swing if c.side == "SHORT"]
 
-            if len(long_votes) >= cfg.swing_min_confluence and len(long_votes) > len(short_votes):
+            swing_min = cfg.swing_min_confluence
+            if len(long_clusters) >= swing_min and len(long_clusters) > len(short_clusters):
                 side = "LONG"
-                confluence = len(long_votes)
-            elif len(short_votes) >= cfg.swing_min_confluence and len(short_votes) > len(long_votes):
+                confluence = len(long_clusters)
+            elif len(short_clusters) >= swing_min and len(short_clusters) > len(long_clusters):
                 side = "SHORT"
-                confluence = len(short_votes)
+                confluence = len(short_clusters)
             else:
                 continue
 
