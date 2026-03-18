@@ -39,7 +39,7 @@ class Settings(BaseSettings):
 
     # ── Capital (Margin-Based Futures Sizing) ─────────────────
     # Position sizing: margin = balance × fraction, notional = margin × leverage
-    initial_capital_usdt: float = 20.0
+    initial_capital_usdt: float = 9.1
     max_total_margin_pct: float = 0.80      # toplam margin: bakiyenin %80'i (sabit 8$ degil!)
     max_trade_margin_pct: float = 0.20      # tek islem margin: bakiyenin %20'si (sabit 3$ degil!)
     per_trade_fraction: float = 0.15        # %15 bakiye margin olarak kullanilsin (6% cok dusuktu)
@@ -103,10 +103,9 @@ class Settings(BaseSettings):
     require_ema_in_mean_reversion: bool | None = None
     require_ema_in_trend_follow: bool | None = None
     require_ema_in_breakout: bool | None = None
-    min_confluence_score: int = 3            # legacy: individual indicator count (used by swing)
-    min_cluster_confluence: int = 2          # cluster system: 2/6 kume mutabakati yeterli
+    min_confluence_score: int = 3            # 3 indikator yeterli (4 cok katiydi, sinyal uretmiyordu)
     # When EMA is not required, demand stronger agreement.
-    min_confluence_no_ema: int = 4           # legacy: EMA yoksa 4 indikator
+    min_confluence_no_ema: int = 4           # EMA yoksa 4 indikator (5 cok yuksekti)
     min_weighted_score_no_ema: float = 35.0    # 0-100 normalized: %35 yeterli (55 cok blokluyordu)
     risk_tight_min_weighted_score: float = 30.0   # TIGHT: %30 yeterli (50 cok engelleyiciydi)
     risk_ultra_min_weighted_score: float = 40.0   # ULTRA_TIGHT: %40 yeterli (65 asiri katiydi)

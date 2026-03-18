@@ -182,6 +182,30 @@ def backtest(
         save_report_csv(report)
 
 
+@cli.command("reset-db")
+@click.option("--confirm", is_flag=True, help="Skip confirmation prompt")
+def reset_db(confirm: bool) -> None:
+    """Reset all trade data for a fresh start. Keeps contracts table."""
+    cfg = load_config()
+
+    if not confirm:
+        click.confirm(
+            f"This will DELETE all trades, orders, positions, signals, PnL data in {cfg.db_path}. Continue?",
+            abort=True,
+        )
+
+    db = Storage(cfg.db_path)
+    tables = ["positions", "orders", "fills", "signals", "market_stats",
+              "pnl_daily", "risk_state_log", "errors", "runs"]
+    for table in tables:
+        db.execute(f"DELETE FROM {table}")  # noqa: S608
+    db.checkpoint_and_vacuum(vacuum=True)
+    db.close()
+
+    click.echo(f"Database reset complete. Starting fresh with {cfg.initial_capital_usdt} USDT.")
+    click.echo("Cleared tables: " + ", ".join(tables))
+
+
 @cli.command("db-cleanup")
 def db_cleanup() -> None:
     """Run database cleanup and vacuum manually."""
