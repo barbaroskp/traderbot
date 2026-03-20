@@ -142,6 +142,11 @@ def _compute_position_tp_sl(
     tp_floor = round_trip_fee_bps + getattr(cfg, "min_tp_net_bps", 10.0)
     tp_bps = max(tp_bps, tp_floor)
 
+    # Reverse signals mode: swap TP/SL for perfect mirror
+    if getattr(cfg, "reverse_signals", False):
+        sl_bps, tp_bps = tp_bps, sl_bps
+        log.info("reverse_signals: swapped TP/SL for position → tp_bps=%.1f, sl_bps=%.1f", tp_bps, sl_bps)
+
     log.info(
         "position dynamic TP/SL computed",
         extra={
@@ -190,6 +195,14 @@ def _compute_tp_sl_bps(
     round_trip_fee_bps = 2.0 * cfg.fee_rate_bps
     tp_floor = round_trip_fee_bps + getattr(cfg, "min_tp_net_bps", 10.0)
     tp_bps = max(tp_bps, tp_floor)
+
+    # Reverse signals mode: swap TP/SL so that the mirror trade hits targets correctly.
+    # Original loser hit SL at X bps → reversed trade needs TP at X bps (old SL).
+    # Original winner hit TP at Y bps → reversed trade needs SL at Y bps (old TP).
+    if getattr(cfg, "reverse_signals", False):
+        sl_bps, tp_bps = tp_bps, sl_bps
+        log.info("reverse_signals: swapped TP/SL for scalp/swing → tp_bps=%.1f, sl_bps=%.1f", tp_bps, sl_bps)
+
     return sl_bps, tp_bps
 
 
