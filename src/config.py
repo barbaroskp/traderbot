@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     paper_mode: bool = True
     allow_live_trading: bool = False
 
+    # ── Reverse Signals ─────────────────────────────────────────
+    # True = tüm sinyalleri tersine çevir (LONG→SHORT, SHORT→LONG)
+    reverse_signals: bool = True
+
     # ── Capital (Margin-Based Futures Sizing) ─────────────────
     # Position sizing: margin = balance × fraction, notional = margin × leverage
     initial_capital_usdt: float = 9.1

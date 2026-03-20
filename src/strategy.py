@@ -157,6 +157,15 @@ class Strategy:
         self.db = db
         self._cooldowns: dict[str, datetime] = {}
 
+    def _flip_signals(self, signals: list[Signal]) -> list[Signal]:
+        """Reverse signal direction if reverse_signals is enabled."""
+        if not self.cfg.reverse_signals:
+            return signals
+        for sig in signals:
+            sig.side = "SHORT" if sig.side == "LONG" else "LONG"
+        log.info("reverse_signals active: flipped %d signal(s)", len(signals))
+        return signals
+
     def generate_signals(
         self,
         snapshots: list[SymbolSnapshot],
@@ -221,7 +230,7 @@ class Strategy:
                 "no signals: no candidate reached min_confluence",
                 extra={"candidates": len(snapshots), "min_confluence": min_confluence},
             )
-        return accepted_list
+        return self._flip_signals(accepted_list)
 
     def _evaluate_snapshot(
         self,
@@ -1473,7 +1482,7 @@ class Strategy:
             "swing signal generation",
             extra={"candidates": len(snapshots), "accepted": len(signals)},
         )
-        return signals
+        return self._flip_signals(signals)
 
     def generate_position_signals(
         self,
@@ -1603,7 +1612,7 @@ class Strategy:
             "position signal generation",
             extra={"candidates": len(snapshots), "accepted": len(signals)},
         )
-        return signals
+        return self._flip_signals(signals)
 
     def set_position_cooldown(self, symbol: str) -> None:
         """Set cooldown for position trade."""
