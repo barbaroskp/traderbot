@@ -365,9 +365,8 @@ class BacktestEngine:
         tp_floor = 2.0 * self.cfg.fee_rate_bps + getattr(self.cfg, "min_tp_net_bps", 10.0)
         tp_bps = max(tp_bps, tp_floor)
 
-        # Reverse signals mode: swap TP/SL for perfect mirror
-        if getattr(self.cfg, "reverse_signals", False):
-            sl_bps, tp_bps = tp_bps, sl_bps
+        # Reverse signals: direction already flipped in strategy.py.
+        # TP/SL must NOT be swapped – same R:R ratio needed for profitability.
 
         if signal.side == "LONG":
             sl_price = entry_price * (1 - sl_bps / 10_000)

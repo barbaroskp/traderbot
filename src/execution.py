@@ -142,10 +142,9 @@ def _compute_position_tp_sl(
     tp_floor = round_trip_fee_bps + getattr(cfg, "min_tp_net_bps", 10.0)
     tp_bps = max(tp_bps, tp_floor)
 
-    # Reverse signals mode: swap TP/SL for perfect mirror
-    if getattr(cfg, "reverse_signals", False):
-        sl_bps, tp_bps = tp_bps, sl_bps
-        log.info("reverse_signals: swapped TP/SL for position → tp_bps=%.1f, sl_bps=%.1f", tp_bps, sl_bps)
+    # Reverse signals: direction already flipped in strategy.py.
+    # TP/SL must NOT be swapped – same R:R ratio needed for profitability.
+    # REMOVED: swap was inverting R:R (e.g. 2.5:1 → 0.4:1)
 
     log.info(
         "position dynamic TP/SL computed",
@@ -196,12 +195,11 @@ def _compute_tp_sl_bps(
     tp_floor = round_trip_fee_bps + getattr(cfg, "min_tp_net_bps", 10.0)
     tp_bps = max(tp_bps, tp_floor)
 
-    # Reverse signals mode: swap TP/SL so that the mirror trade hits targets correctly.
-    # Original loser hit SL at X bps → reversed trade needs TP at X bps (old SL).
-    # Original winner hit TP at Y bps → reversed trade needs SL at Y bps (old TP).
-    if getattr(cfg, "reverse_signals", False):
-        sl_bps, tp_bps = tp_bps, sl_bps
-        log.info("reverse_signals: swapped TP/SL for scalp/swing → tp_bps=%.1f, sl_bps=%.1f", tp_bps, sl_bps)
+    # Reverse signals mode: direction is already flipped (LONG→SHORT, SHORT→LONG)
+    # in strategy.py. TP/SL should NOT be swapped – the reversed trade needs the
+    # SAME R:R ratio to be profitable.  Swapping TP/SL inverts R:R (e.g. 2.4:1 → 0.42:1)
+    # which guarantees losses even with high win rate.
+    # REMOVED: the old swap was the #1 cause of negative profit factor.
 
     return sl_bps, tp_bps
 
@@ -951,6 +949,22 @@ class LiveExecution(ExecutionAdapter):
         step_size = contract.get("step_size", 0.001) if contract else 0.001
         qty = self._round_qty(qty, step_size)
         if qty <= 0:
+            return None
+
+        # Minimum notional check: BingX requires ~$2 notional for most pairs
+        notional = qty * snap.mid_price if snap.mid_price > 0 else 0
+        min_notional = 2.0  # BingX perpetual futures minimum
+        if notional < min_notional:
+            log.warning(
+                "live: notional below exchange minimum",
+                extra={
+                    "symbol": signal.symbol,
+                    "notional": round(notional, 4),
+                    "min_notional": min_notional,
+                    "qty": qty,
+                    "price": snap.mid_price,
+                },
+            )
             return None
 
         # Set leverage + margin mode (use override when high-conviction signal)

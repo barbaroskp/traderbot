@@ -250,7 +250,7 @@ class RiskManager:
         Even in ULTRA_TIGHT, allows reasonable trade sizes.
         """
         base = self._current_balance * self.cfg.max_trade_margin_pct
-        base = max(base, 1.0)  # minimum 1$ margin
+        base = max(base, 0.3)  # minimum 0.3$ margin (was 1$ – too high for micro accounts)
         if self._state == RiskState.TIGHT:
             return base * 0.7   # 70% of max margin
         elif self._state == RiskState.ULTRA_TIGHT:
@@ -260,7 +260,7 @@ class RiskManager:
     def get_max_total_margin(self) -> float:
         """Max total MARGIN across all positions – percentage of current balance."""
         base = self._current_balance * self.cfg.max_total_margin_pct
-        base = max(base, 2.0)  # minimum 2$ total
+        base = max(base, 0.6)  # minimum 0.6$ total (was 2$ – too high for micro accounts)
         if self._state == RiskState.TIGHT:
             return base * 0.7
         elif self._state == RiskState.ULTRA_TIGHT:
@@ -316,10 +316,22 @@ class RiskManager:
         # Apply fractional Kelly (half-Kelly default)
         kelly *= self.cfg.kelly_fraction
 
+        # If raw Kelly is negative, strategy has no edge – use minimum sizing
+        # but log a warning so operators know the strategy needs improvement
+        raw_kelly = kelly
         # Clamp to configured bounds
         kelly = max(self.cfg.kelly_min_fraction, min(self.cfg.kelly_max_fraction, kelly))
 
-        if kelly <= 0:
+        if raw_kelly <= 0:
+            log.warning(
+                "kelly criterion negative: strategy has no edge",
+                extra={
+                    "raw_kelly": round(raw_kelly, 4),
+                    "win_rate": round(p, 3),
+                    "win_loss_ratio": round(win_loss_ratio, 3),
+                    "using_min_fraction": self.cfg.kelly_min_fraction,
+                },
+            )
             return self.cfg.kelly_min_fraction
 
         log.debug(
@@ -355,7 +367,10 @@ class RiskManager:
         max_trade_margin = self.get_max_trade_margin()
         max_total_margin = self.get_max_total_margin()
         remaining_margin = max(0, max_total_margin - current_total_margin)
-        min_margin = 1.0  # minimum viable margin: 1$ (2$ cok yuksekti dusuk bakiye icin)
+
+        # Adaptive min_margin: scale with balance (floor 0.3$ for micro accounts)
+        min_margin = max(0.3, self._current_balance * 0.05)
+        min_margin = min(min_margin, 1.0)  # cap at 1$ – never require more than $1
 
         # Hard stop: never open new position if margin budget is exhausted
         if price <= 0 or remaining_margin < min_margin:
