@@ -1,50 +1,44 @@
-# BingX Agent — trading bot, and the measurements that judge it
+# BingX Agent
 
-Autonomous trading bot for **BingX Perpetual Futures (Swap V2)**: 24 technical
-indicators grouped into 7 voting clusters, adaptive risk management, and
-paper/live dual-mode execution.
+Autonomous trading bot for **BingX Perpetual Futures (Swap V2)** — 24 technical
+indicators grouped into seven voting clusters, adaptive risk management, and
+paper/live dual-mode execution — together with the research harness used to
+evaluate it.
 
-Alongside it, a research harness that replays the shipped decision engine over
-real history and answers the only question that matters — **does it make
-money?**
+The harness replays the shipped decision engine over historical market data and
+measures the result. Its findings are summarised below and detailed in
+[RESEARCH-SYNTHESIS.md](RESEARCH-SYNTHESIS.md). A plain-language walkthrough in
+Turkish is in [BOT-NASIL-CALISIR.md](BOT-NASIL-CALISIR.md).
 
-> **New here? Read [BOT-NASIL-CALISIR.md](BOT-NASIL-CALISIR.md)** (Turkish) for a
-> plain-language explanation of how the bot works and what was measured.
+## Results
 
-## What the measurements say
+The bot's own decision engine, replayed across 89 BingX symbols over 41 days of
+5-minute and hourly data, with fees, slippage and funding charged:
 
-The bot's own code, replayed on 89 BingX symbols over 41 days of real
-5-minute and hourly prices, with fees, slippage and funding charged:
+| configuration | starting 10,000 | ends at | trades | win rate |
+|---|---|---|---|---|
+| current (post-refactor) | 10,000 | **8,956** (−10.4%) | 171 | 43% |
+| as originally shipped | 10,000 | **34** (−99.7%) | 4,122 | 29% |
 
-| configuration | 10,000 → |
-|---|---|
-| current config (post-refactor) | **8,956** (−10.4%) |
-| config as first shipped | **34** (−99.7%) |
+The second configuration lost money on the trades themselves before commission
+was applied: −5,798 gross, −2,778 in fees.
 
-The second line is the one to sit with: that configuration won **29% of 4,122
-trades** on its way to zero, and its trades were already losing *before*
-commission (−5,798 gross, −2,778 fees).
+Four further studies were run to establish whether any configuration performs
+better:
 
-Everything tried to rescue it, and the result of each:
+| study | scope | result |
+|---|---|---|
+| indicator attribution | 24 indicators, 93,193 votes | none clears its transaction cost |
+| parameter sweep | 16 configurations, fit/test split | none profitable in both halves |
+| rule search | 1,008 independent rules | fit↔test correlation −0.037 |
+| timeframe map | 14 signals × 7 timeframes | only daily MACD is statistically solid, and only in coins too illiquid to trade |
 
-- all **24 indicators** scored individually across **93,193 votes** — none
-  clears its own transaction cost
-- **16 parameter sets** fitted on one half of the sample and scored on the
-  other — none profitable in both
-- **1,008 independent rules** searched; correlation between in-sample and
-  out-of-sample performance is **−0.037**, i.e. the winners could not have
-  been picked in advance
-- **7 timeframes** from 1-minute to daily — the only statistically solid
-  signal was daily MACD, and it lived only in coins too illiquid to trade
+The one approach that measured positive was holding a basket with infrequent
+rebalancing, implemented in `src/allocator.py`.
 
-What survived measurement was holding a basket and rebalancing rarely
-(`src/allocator.py`). Full detail in
-[RESEARCH-SYNTHESIS.md](RESEARCH-SYNTHESIS.md).
+### Data and methodology
 
-### Scale of the research
-
-Every number in this repository comes from data downloaded and replayed here,
-not from a citation. What that took:
+All figures are derived from data downloaded and replayed in this repository.
 
 **Market data**
 
@@ -75,30 +69,31 @@ Roughly **4.7 million bars**, all cached to disk and gitignored.
 | cross-sectional selection | 9 signals × 5 turnover settings | 372 symbols |
 | full bot replay | the shipped engine, bar by bar | 11,885 cycles |
 
-**Discipline applied to all of it**
+**Methodology**
 
-- every forward return is **cross-sectionally demeaned** — crypto and BIST both
-  rose over their windows, and without this every long signal looks skilled
-- **|t| ≥ 3.0**, not 2.0 (Harvey, Liu & Zhu), because many rules are tried
-- **fit on one half, score on the other**, always reported as a pair
-- results that survive are then attacked on **breadth** (drop the best ten
-  symbols) and **stability** (month by month)
-- costs taken from live BingX books and the BIST tick table, never assumed
+- Forward returns are cross-sectionally demeaned. Both crypto and BIST rose
+  over their sample windows; without this adjustment every long signal appears
+  skilled and every short signal broken.
+- Significance threshold is |t| ≥ 3.0 rather than 2.0, following Harvey, Liu &
+  Zhu, because many rules are tested against the same data.
+- Candidates are fitted on one half of the sample and scored on the other, and
+  both figures are always reported.
+- Survivors are then tested for breadth (results recomputed with the ten best
+  symbols removed) and stability (month by month).
+- Costs are taken from live BingX order books and the BIST tick table.
 
-That discipline is why the conclusion is negative. An earlier, looser pass
-produced four "findings" that all died: shock reversion (t=+3.66 year one,
-−0.71 year two), moving-average filters (a look-ahead bug), the drawdown brake
-(an equity-vs-price re-entry bug), and tier-C trend following (t=+3.48 → +0.96
-once the universe was selected point-in-time).
+This standard is why the conclusion is negative. An earlier, looser pass
+produced four apparent findings, each of which failed on closer inspection:
+shock reversion (t = +3.66 in year one, −0.71 in year two), moving-average
+filters (look-ahead bias), the drawdown brake (an equity-versus-price re-entry
+error), and tier-C trend following (t = +3.48 falling to +0.96 once the
+universe was selected point-in-time).
 
-Two of the bugs were mine, found mid-session and documented rather than
-quietly fixed: a TP/SL unpacking inversion that made the replay report −99.9%,
-and a liquidity ranking contaminated by lira inflation that inverted a
-conclusion outright.
-
-**Read the research before trusting any backtest in this repo.** Four separate
-findings looked strong here and collapsed under scrutiny, two of them because
-of bugs in my own analysis code. All four are documented.
+Two errors in the analysis code are documented rather than silently corrected:
+a TP/SL unpacking inversion that caused the replay to report −99.9%, and a
+liquidity ranking distorted by lira inflation that reversed a conclusion
+outright. Both are described in
+[RESEARCH-SYNTHESIS.md](RESEARCH-SYNTHESIS.md).
 
 ## Architecture
 
@@ -225,8 +220,8 @@ Exit: **TP**, **SL** (both sized from ATR), or **timeout**
 (`max_hold_minutes`). The TP floor is the full round-trip cost plus
 `min_tp_net_bps`, so a take-profit cannot book a net loss.
 
-**Measured result of all this: see the top of this file.** The architecture is
-sound; the signal is not.
+Measured performance of this engine is reported under [Results](#results)
+above.
 
 ## Risk Management
 
@@ -240,13 +235,14 @@ Three-state risk machine that **never stops** the bot:
 
 Automatic de-escalation when consecutive wins and stable cycles accumulate.
 
-## Improving profitability — what was tried, and what happened
+## Parameter tuning
 
-This section used to suggest tuning: stricter confluence, better risk–reward,
-less overtrading. All of it was then measured, and none of it worked. Keeping
-the original advice here would be misleading, so here are the results instead.
+This section previously recommended stricter confluence thresholds, wider
+risk–reward ratios and reduced trade frequency as routes to higher returns.
+Each was subsequently tested and none improved the result, so the
+recommendations have been replaced by the measurements.
 
-Each variant was fitted on the first half of the sample and scored on the
+Every variant was fitted on the first half of the sample and scored on the
 second:
 
 | variant | fit | test |
@@ -260,31 +256,28 @@ second:
 
 **Positive in both windows: 0 of 16.**
 
-Two patterns are worth extracting:
+Two relationships hold across the variants:
 
-1. **Loss scales with trade count.** 23 trades → −0.19%; 79 → −4.71%; 166 →
-   −8.94%. Each trade has negative expectancy, and parameters only change how
-   many of them you take.
-2. **Leverage is monotonically harmful.** It creates no edge; it multiplies
-   the one that is already negative. The growth-optimal leverage for the
-   surviving basket strategy is `L* = (μ−r)/σ² ≈ 1.05x`, and growth turns
-   negative at 2.10x.
+1. **Losses scale with trade count** — 23 trades give −0.19%, 79 give −4.71%,
+   166 give −8.94%. Per-trade expectancy is negative, and the parameters
+   determine only how many such trades are taken.
+2. **Leverage compounds the loss rather than creating an edge.** For the
+   basket strategy the growth-optimal level is `L* = (μ−r)/σ² ≈ 1.05x`, and
+   the growth rate turns negative at 2.10x.
 
-Run them yourself:
+To reproduce:
 
 ```bash
 python -m research.replay.sweep --days 40        # the table above
 python -m research.replay.attribution            # all 24 indicators scored
 python -m research.replay.search --days 40       # 1,008 independent rules
-python -m src.costs 0.10                         # does YOUR broker clear it?
+python -m src.costs 0.10                         # break-even against your own broker
 ```
 
 ### Optional LLM Advisor (Ollama)
 
-Still available and still off by default. Note that it can only filter the
-signals above, and the measurement says those signals carry no edge to filter.
-
-### Optional LLM Advisor (Ollama)
+Available and disabled by default. Note that the advisor filters the signals
+described above, and those signals were measured to carry no edge.
 
 Bot, her sinyali çalıştırmadan önce yerel bir LLM’e sorabilir (onay / red / küçült). Bu özellik kapalıyken davranış tamamen script ile aynıdır.
 
