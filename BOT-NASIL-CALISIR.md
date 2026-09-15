@@ -1,35 +1,38 @@
-# Bu bot ne yapıyor?
+# BingX Agent — Çalışma Mantığı ve Ölçüm Sonuçları
 
-> Hiç bilmeyen biri için özet yukarıda, teknik detay aşağıda.
+## Özet
+
+Bu depo bir kripto alım-satım botu ve onu değerlendirmek için kurulmuş ölçüm
+altyapısını içerir.
+
+Bot, BingX borsasındaki coinleri beş dakikada bir tarar, her biri için 24
+teknik gösterge hesaplar, yeterli sayıda gösterge aynı yönü işaret ettiğinde
+pozisyon açar ve kâr hedefine ya da zarar durdurucusuna ulaştığında kapatır.
+
+Ölçüm altyapısı ise botun kendi karar motorunu geçmiş piyasa verisi üzerinde
+yeniden çalıştırır ve sonucu raporlar. Bu belge, botun nasıl çalıştığını ve
+ölçümlerin ne gösterdiğini anlatır.
+
+Sonuç önden verilmek gerekirse: bot, 41 günlük gerçek BingX verisinde 10.000
+TL'yi 8.956 TL'ye düşürmektedir. İlk yapılandırmasıyla bu rakam 34 TL'dir.
+Nedenleri ve pozitif sonuç veren tek yaklaşım aşağıda ele alınmıştır.
 
 ---
 
-## 1. Tek paragrafta
+## 1. Çalışma döngüsü
 
-Bu depo bir **kripto alım-satım botu** ve onun etrafında yapılmış **ölçüm
-çalışmalarını** içeriyor. Bot, BingX borsasındaki coinleri sürekli tarıyor,
-24 farklı teknik göstergeyi hesaplıyor, yeterince gösterge aynı yönü
-işaret ederse pozisyon açıyor, kâr hedefine veya zarar durdurucusuna
-gelince kapatıyor.
+Bot her beş dakikada bir aşağıdaki adımları yürütür.
 
-Depodaki araştırma kısmı ise şu soruyu cevaplıyor: **bu gerçekten para
-kazandırıyor mu?** Cevap ölçüldü ve bu belgede saklanmıyor.
+**Tarama.** Borsadaki yüzlerce coinden yeterince likit olanları seçer. Likidite
+burada iki şey demektir: alış-satış farkının (makas) dar olması ve günlük işlem
+hacminin yüksek olması. Likit olmayan bir coinde işlem yapmanın maliyeti,
+beklenen kazancı aşar.
 
----
+**Ölçüm.** Seçilen her coin için son 100 mum alınır ve 24 gösterge hesaplanır:
+RSI, MACD, Bollinger bantları, hareketli ortalamalar, hacim patlaması, emir
+defteri dengesizliği ve diğerleri.
 
-## 2. Bot nasıl çalışıyor — adım adım
-
-Bot her 5 dakikada bir şu döngüyü çalıştırıyor:
-
-**Adım 1 — Tara.** Borsadaki yüzlerce coinden, yeterince likit olanları
-seçiyor. Likit demek: alım-satım farkı (makas) dar ve günlük hacmi yüksek.
-Likit olmayan coinde işlem yapmak pahalıdır.
-
-**Adım 2 — Ölç.** Seçilen her coin için son 100 mumu alıp 24 gösterge
-hesaplıyor: RSI, MACD, Bollinger bantları, hareketli ortalamalar, hacim
-patlaması, emir defteri dengesizliği ve diğerleri.
-
-**Adım 3 — Oyla.** Göstergeler 7 kümeye ayrılmış durumda:
+**Oylama.** Göstergeler yedi kümeye ayrılmıştır:
 
 | küme | ne bakıyor | üyeleri |
 |---|---|---|
@@ -44,23 +47,23 @@ patlaması, emir defteri dengesizliği ve diğerleri.
 Her küme kendi içinde hemfikirse tek bir oy veriyor. Yeterli sayıda küme
 aynı yönü gösterirse sinyal doğuyor.
 
-**Adım 4 — Süz.** Sinyal birçok kapıdan geçiyor: aynı coinde yakın zamanda
-işlem yapıldı mı, açık pozisyon sınırı doldu mu, beklenen kâr komisyonu
-karşılıyor mu, risk durumu normal mi.
+**Filtreleme.** Doğan sinyal bir dizi kapıdan geçer: aynı coinde yakın zamanda
+işlem yapılmış mı, açık pozisyon sınırı dolmuş mu, beklenen kâr işlem
+maliyetini karşılıyor mu, risk durumu normal mi.
 
-**Adım 5 — Aç.** Geçerse pozisyon açılıyor. Büyüklük, o anki bakiyeye göre
-hesaplanıyor — yani para büyüdükçe pozisyonlar da büyüyor. Kâr hedefi ve
-zarar durdurucu, coinin oynaklığına göre belirleniyor.
+**Pozisyon açma.** Filtreleri geçen sinyal için pozisyon açılır. Büyüklük o
+anki bakiyeye göre hesaplanır, dolayısıyla sermaye büyüdükçe pozisyonlar da
+büyür. Kâr hedefi ve zarar durdurucu, coinin oynaklığına (ATR) göre belirlenir.
 
-**Adım 6 — Yönet.** Her turda açık pozisyonlar kontrol ediliyor: hedefe
-ulaştı mı, stopa değdi mi, süre doldu mu. Biri olursa kapatılıyor.
+**Pozisyon yönetimi.** Her turda açık pozisyonlar kontrol edilir: hedefe
+ulaşıldı mı, stop seviyesine değildi mi, azami tutma süresi doldu mu.
 
 ---
 
-## 3. Bu bot para kazanıyor mu?
+## 2. Ölçüm sonuçları
 
-Hayır. Ve bunu tahmin ederek değil, **botun kendi kodunu geçmiş veride
-çalıştırarak** biliyoruz.
+Bot para kazanmıyor. Bu, tahmin değil ölçüm sonucudur: botun kendi kodu geçmiş
+veri üzerinde yeniden çalıştırılarak elde edilmiştir.
 
 BingX'te 89 coin, 41 gün, saatlik ve 5 dakikalık gerçek fiyatlarla:
 
@@ -69,16 +72,16 @@ BingX'te 89 coin, 41 gün, saatlik ve 5 dakikalık gerçek fiyatlarla:
 | bugünkü ayarlar | **8.956 TL** (−%10,4) |
 | ilk kurulan ayarlar | **34 TL** (−%99,7) |
 
-İkinci satır önemli: bot ilk yazıldığında 3x kaldıraç, bakiyenin %80'i
-marj ve 5 eşzamanlı pozisyon kullanıyordu. 41 günde 4.122 işlem yaptı,
-**işlemlerin %29'unu kazandı** ve parayı sıfırladı.
+İkinci satır dikkat çekicidir. Bot ilk yazıldığında 3x kaldıraç, bakiyenin
+%80'i marj ve beş eşzamanlı pozisyon kullanıyordu; 41 günde 4.122 işlem yaptı,
+bunların %29'unu kazandı ve sermayeyi tüketti.
 
-Neden? Çünkü işlemlerin kendisi komisyondan *önce* zarardaydı (−5.798 TL),
-komisyon üstüne 2.778 TL daha ekledi.
+Kaybın kaynağı yalnızca komisyon değildir: işlemler komisyon düşülmeden önce
+de zarardaydı (−5.798 TL). Komisyon bunun üzerine 2.778 TL ekledi.
 
-### Denenen her şey
+### Denenen yapılandırmalar
 
-Bu deponun araştırma kısmı, botun kazanmasını sağlayacak bir ayar aradı:
+Deponun araştırma bölümünde, botu kâra geçirecek bir yapılandırma arandı:
 
 - **24 göstergenin her biri** ayrı ayrı ölçüldü, 93.193 oy üzerinde.
   Hiçbiri işlem maliyetini aşmadı.
@@ -92,10 +95,9 @@ Bu deponun araştırma kısmı, botun kazanmasını sağlayacak bir ayar aradı:
   olarak sağlam sinyal günlük MACD çıktı, ama o da sadece işlem maliyetinin
   yüksek olduğu likit olmayan coinlerde çalışıyordu.
 
-### Bu sonuçlar ne kadar veriye dayanıyor
+### Veri ve yöntem
 
-Buradaki hiçbir sayı alıntı değil — hepsi indirilip bu depoda çalıştırılan
-veriden çıktı.
+Buradaki sayıların tamamı, bu depoda indirilip çalıştırılan veriden üretilmiştir.
 
 **İndirilen piyasa verisi**
 
@@ -139,21 +141,23 @@ Toplam yaklaşık **4,7 milyon mum.**
 - maliyetler canlı BingX kitabından ve BIST kademe tablosundan alındı,
   varsayılmadı
 
-**Bu disiplin yüzünden sonuç negatif.** Daha gevşek bir ilk turda dört ayrı
-"bulgu" ortaya çıkmıştı ve dördü de öldü: şok dönüşü (birinci yıl t=+3,66,
-ikinci yıl −0,71), hareketli ortalama filtreleri (geleceğe bakma hatası),
-düşüş freni (yanlış yeniden giriş mantığı), tier-C trend takibi (evren geçmişe
-bakarak seçilince t=+3,48'den +0,96'ya düştü).
+Sonucun negatif olması bu ölçütlerin uygulanmasından kaynaklanmaktadır. Daha
+gevşek bir ilk turda dört ayrı bulgu ortaya çıkmış, dördü de yakın incelemede
+geçersiz kalmıştır: şok dönüşü (birinci yıl t=+3,66, ikinci yıl −0,71),
+hareketli ortalama filtreleri (geleceğe bakma hatası), düşüş freni (özkaynak
+yerine fiyata bakması gereken yeniden giriş mantığı) ve tier-C trend takibi
+(evren nokta-zaman seçilince t=+3,48'den +0,96'ya düşmüştür).
 
-İkisi benim hatamdı, oturum ortasında bulunup sessizce düzeltilmek yerine
-kayda geçirildi: TP/SL'yi ters bağlamam (replay −%99,9 raporladı) ve likidite
-sıralamasını TL enflasyonuyla kirletmem (bir sonucu tamamen tersine çevirmişti).
+Analiz kodundaki iki hata da sessizce düzeltilmek yerine kayda geçirilmiştir:
+TP ve SL değerlerinin ters bağlanması (replay'in −%99,9 raporlamasına yol
+açmıştı) ve likidite sıralamasının TL enflasyonundan etkilenmesi (bir sonucu
+tamamen tersine çevirmişti).
 
-### Neden kaybediyor — tek cümlelik açıklama
+### Kaybın yapısal nedeni
 
-Her alım-satım sabit bir gişe parası ödetiyor (BingX'te yaklaşık %0,16).
-Fiyatın 5 dakikada oynadığı mesafe bu paradan küçük, bir günde oynadığı
-mesafe büyük. Gösterge iyi ya da kötü olması bunu değiştirmiyor.
+Her alım-satım işlemi sabit bir maliyet doğurur (BingX'te yaklaşık %0,16).
+Fiyatın beş dakikada kat ettiği mesafe bu maliyetin altında, bir günde kat
+ettiği mesafe ise üzerindedir. Göstergenin niteliği bu ilişkiyi değiştirmez.
 
 ```
  1 saat tutarsan   → işlem başına -%0,131
@@ -162,14 +166,14 @@ mesafe büyük. Gösterge iyi ya da kötü olması bunu değiştirmiyor.
 24 saat tutarsan   → işlem başına +%0,595
 ```
 
-Bu tabloda **hiçbir gösterge kullanılmıyor** — rastgele giriliyor. Tek
-değişen, ne kadar beklendiği.
+Bu tabloda hiçbir gösterge kullanılmamaktadır; giriş noktaları rastgeledir.
+Değişen tek parametre tutma süresidir.
 
 ---
 
-## 4. Peki ne çalışıyor?
+## 3. Ölçümden geçen tek yaklaşım
 
-Ölçümden sağ çıkan tek şey **varlık tutmak**:
+Test edilenler arasında pozitif sonuç veren tek yöntem varlık tutmak oldu:
 
 | strateji | yıllık getiri | en kötü düşüş |
 |---|---|---|
@@ -186,7 +190,7 @@ oranları koruyor.
 
 ---
 
-## 5. Depoda ne var
+## 4. Depo yapısı
 
 ```
 src/
@@ -209,7 +213,7 @@ research/
 tests/                 331 test
 ```
 
-### Nasıl çalıştırılır
+### Kurulum ve çalıştırma
 
 ```bash
 pip install -r requirements.txt
@@ -231,31 +235,27 @@ python -m src.costs 0.10
 
 ---
 
-## 6. Bu depoyu okuyan biri için uyarılar
+## 5. Uyarılar
 
-**Backtest sonuçlarına dikkat.** Bu projede dört ayrı "bulgu" güçlü
-göründü ve incelenince çöktü: şok-dönüşü (birinci yıl t=+3,66, ikinci yıl
-−0,71), hareketli ortalama filtreleri (geleceğe bakma hatası), düşüş
-freni (yanlış yeniden giriş mantığı), ve tier-C trend takibi (evren
-geçmişe bakarak seçilince t=+3,48'den +0,96'ya düştü).
+**Deneme bütçesi sınırlıdır.** Bailey ve López de Prado'nun asgari backtest
+uzunluğu sonucuna göre, iki yıllık veriyle yaklaşık yedi bağımsız yapılandırma
+denenebilir; bu sayının ötesinde, örneklem içinde kazanıp dışında hiçbir değer
+üretmeyen bir sonuç elde etmek kaçınılmaz hale gelir. Bu depoda elliden fazla
+kural denenmiştir. Dolayısıyla buradaki hiçbir rakam kesinleşmiş bir ölçüm
+değil, ileriye doğru doğrulanması gereken bir hipotezdir.
 
-**Deneme bütçesi diye bir şey var.** 2 yıllık veriyle yaklaşık 7 bağımsız
-kural denenebilir; ötesinde örneklem içinde kazanıp dışında hiçbir şey
-yapmayan bir "bulgu" garanti hale gelir. Bu depoda 50'den fazla kural
-denendi, yani buradaki hiçbir sayı ölçüm değil, ileriye doğru
-doğrulanması gereken hipotez.
+**Anlamlılık eşiği t > 3,0'dır, 2,0 değil** (Harvey, Liu & Zhu). Aynı veri
+üzerinde çok sayıda kural denendiğinde beklenen en yüksek t değeri, hiçbir
+yetenek olmasa dahi yükselir. `research/bist/referee.py` bu nedenle 3,0
+kullanmaktadır.
 
-**Yeni faktör eşiği t > 3,0'dır, 2,0 değil** (Harvey, Liu & Zhu).
-`research/bist/referee.py` bu yüzden 3,0 kullanıyor.
-
-**Kendi hatalarım da kayıtlı.** Bu oturumda replay motorunda TP ve SL'yi
-ters bağladığım için bot −%99,9 raporladı; düzeltince −%99,7 oldu. Hata
-gerçekti ama sonucu değiştirmedi. `RESEARCH-SYNTHESIS.md` içinde dört
-hatanın hepsi yazılı.
+**Backtest sonuçları tek başına delil sayılmamalıdır.** Bu projede güçlü
+görünüp incelemede geçersiz kalan dört bulgunun ayrıntısı bölüm 2'dedir;
+analiz kodundaki iki hata da aynı yerde kayıtlıdır.
 
 ---
 
-## 7. Detaylı belgeler
+## 6. İlgili belgeler
 
 | dosya | içerik |
 |---|---|
@@ -267,12 +267,13 @@ hatanın hepsi yazılı.
 
 ---
 
-## 8. Son söz
+## 7. Değerlendirme
 
-Bu depo bir para makinesi değil. Bir **ölçüm aracı**.
+Bu depo bir kazanç aracı değil, bir ölçüm aracıdır.
 
-Asıl değeri, bir stratejinin işe yaramayacağını para riske atmadan,
-saatler içinde söyleyebilmesinde. Bu oturumda beş ayrı fikir bu şekilde
-elendi — her biri mantıklı görünüyordu, hiçbiri ölçümden geçmedi.
+Pratik değeri, bir stratejinin işe yaramayacağını sermaye riske atmadan ve
+saatler içinde ortaya koyabilmesinde. Çalışma sürecinde beş ayrı yaklaşım bu
+şekilde elendi; her biri makul görünüyordu, hiçbiri ölçüm eşiğini geçemedi.
 
-Kazandıran şeyin ne olduğu da ölçüldü: **işlem yapmak değil, sahip olmak.**
+Pozitif sonuç veren tek yaklaşımın ne olduğu da ölçüldü: sık işlem yapmak
+değil, pozisyonda kalmak.
