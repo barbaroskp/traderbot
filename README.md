@@ -41,6 +41,61 @@ What survived measurement was holding a basket and rebalancing rarely
 (`src/allocator.py`). Full detail in
 [RESEARCH-SYNTHESIS.md](RESEARCH-SYNTHESIS.md).
 
+### Scale of the research
+
+Every number in this repository comes from data downloaded and replayed here,
+not from a citation. What that took:
+
+**Market data**
+
+| market | breadth | depth | observations |
+|---|---|---|---|
+| BingX perpetuals | 1,216 contracts discovered, 967 with live books | 372 symbols × 999 daily bars (2.7 yr) | 371,628 |
+| BingX perpetuals | 196 symbols | 3,996 hourly bars each (166 d) | 783,216 |
+| BingX perpetuals | 89 symbols | 11,988 five-minute bars each (41 d) | 1,066,932 |
+| BingX perpetuals | 150 symbols | 1m / 5m / 15m / 30m / 4h panels | ~2,100,000 |
+| Borsa İstanbul | 136 tickers | 2,543 daily bars (10 yr) | 345,848 |
+| Borsa İstanbul | 136 tickers | hourly, 2 yr | 68,257 |
+| multi-asset, in lira | BTC ETH XU100 GOLD SP500 SILVER USDTRY | 10 yr daily | 22,603 |
+
+Roughly **4.7 million bars**, all cached to disk and gitignored.
+
+**Studies run on it**
+
+| study | what was tested | sample |
+|---|---|---|
+| indicator attribution | all 24 shipped indicators | 93,193 directional votes |
+| intraday signal map | 9 signals × 4 horizons | 772,150 hourly observations |
+| confluence test | vote-count → forward return | 767,446 observations |
+| multi-timeframe map | 14 signals × 7 timeframes | 1m through daily |
+| rule search | 1,008 independent rules | fit/test split |
+| parameter sweep | 16 configurations | fit/test split |
+| opening-gap study | 30 rules, then an artefact audit | 68,104 ticker-days |
+| BIST technical rules | 12 rules, then 5 from the literature | 326,040 ticker-days |
+| cross-sectional selection | 9 signals × 5 turnover settings | 372 symbols |
+| full bot replay | the shipped engine, bar by bar | 11,885 cycles |
+
+**Discipline applied to all of it**
+
+- every forward return is **cross-sectionally demeaned** — crypto and BIST both
+  rose over their windows, and without this every long signal looks skilled
+- **|t| ≥ 3.0**, not 2.0 (Harvey, Liu & Zhu), because many rules are tried
+- **fit on one half, score on the other**, always reported as a pair
+- results that survive are then attacked on **breadth** (drop the best ten
+  symbols) and **stability** (month by month)
+- costs taken from live BingX books and the BIST tick table, never assumed
+
+That discipline is why the conclusion is negative. An earlier, looser pass
+produced four "findings" that all died: shock reversion (t=+3.66 year one,
+−0.71 year two), moving-average filters (a look-ahead bug), the drawdown brake
+(an equity-vs-price re-entry bug), and tier-C trend following (t=+3.48 → +0.96
+once the universe was selected point-in-time).
+
+Two of the bugs were mine, found mid-session and documented rather than
+quietly fixed: a TP/SL unpacking inversion that made the replay report −99.9%,
+and a liquidity ranking contaminated by lira inflation that inverted a
+conclusion outright.
+
 **Read the research before trusting any backtest in this repo.** Four separate
 findings looked strong here and collapsed under scrutiny, two of them because
 of bugs in my own analysis code. All four are documented.

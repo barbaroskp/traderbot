@@ -92,6 +92,63 @@ Bu deponun araştırma kısmı, botun kazanmasını sağlayacak bir ayar aradı:
   olarak sağlam sinyal günlük MACD çıktı, ama o da sadece işlem maliyetinin
   yüksek olduğu likit olmayan coinlerde çalışıyordu.
 
+### Bu sonuçlar ne kadar veriye dayanıyor
+
+Buradaki hiçbir sayı alıntı değil — hepsi indirilip bu depoda çalıştırılan
+veriden çıktı.
+
+**İndirilen piyasa verisi**
+
+| piyasa | genişlik | derinlik | gözlem |
+|---|---|---|---|
+| BingX perpetual | 1.216 kontrat tarandı, 967'sinde canlı kitap | 372 sembol × 999 günlük bar (2,7 yıl) | 371.628 |
+| BingX perpetual | 196 sembol | her biri 3.996 saatlik bar (166 gün) | 783.216 |
+| BingX perpetual | 89 sembol | her biri 11.988 beş-dakikalık bar (41 gün) | 1.066.932 |
+| BingX perpetual | 150 sembol | 1dk / 5dk / 15dk / 30dk / 4sa panelleri | ~2.100.000 |
+| Borsa İstanbul | 136 hisse | 2.543 günlük bar (10 yıl) | 345.848 |
+| Borsa İstanbul | 136 hisse | saatlik, 2 yıl | 68.257 |
+| çok varlıklı, TL bazında | BTC ETH XU100 ALTIN SP500 GÜMÜŞ USDTRY | 10 yıl günlük | 22.603 |
+
+Toplam yaklaşık **4,7 milyon mum.**
+
+**Üzerinde yapılan çalışmalar**
+
+| çalışma | test edilen | örneklem |
+|---|---|---|
+| indikatör atfı | botun 24 indikatörünün hepsi | 93.193 yönlü oy |
+| gün içi sinyal haritası | 9 sinyal × 4 ufuk | 772.150 saatlik gözlem |
+| konfluans testi | oy sayısı → ileri getiri | 767.446 gözlem |
+| çok zaman dilimli harita | 14 sinyal × 7 zaman dilimi | 1 dakikadan günlüğe |
+| kural taraması | 1.008 bağımsız kural | fit/test ayrımıyla |
+| parametre taraması | 16 konfigürasyon | fit/test ayrımıyla |
+| açılış boşluğu çalışması | 30 kural + artifakt denetimi | 68.104 hisse-gün |
+| BIST teknik kuralları | 12 kural + literatürden 5 etki | 326.040 hisse-gün |
+| kesitsel seçim | 9 sinyal × 5 devir ayarı | 372 sembol |
+| tam bot replay'i | botun kendi kodu, bar bar | 11.885 tur |
+
+**Uygulanan disiplin**
+
+- her ileri getiri **kesitsel olarak ortalamadan arındırıldı** — kripto da BIST
+  de kendi pencerelerinde yükseldi, bu yapılmazsa her long sinyali yetenekli
+  görünür
+- eşik **|t| ≥ 3,0**, 2,0 değil (Harvey, Liu & Zhu) — çok sayıda kural
+  denendiği için
+- **ilk yarıda ayarla, ikinci yarıda ölç**, ikisi de birlikte raporlanır
+- ayakta kalanlara ayrıca **genişlik** (en iyi 10 sembolü at) ve **istikrar**
+  (ay ay) testi uygulanır
+- maliyetler canlı BingX kitabından ve BIST kademe tablosundan alındı,
+  varsayılmadı
+
+**Bu disiplin yüzünden sonuç negatif.** Daha gevşek bir ilk turda dört ayrı
+"bulgu" ortaya çıkmıştı ve dördü de öldü: şok dönüşü (birinci yıl t=+3,66,
+ikinci yıl −0,71), hareketli ortalama filtreleri (geleceğe bakma hatası),
+düşüş freni (yanlış yeniden giriş mantığı), tier-C trend takibi (evren geçmişe
+bakarak seçilince t=+3,48'den +0,96'ya düştü).
+
+İkisi benim hatamdı, oturum ortasında bulunup sessizce düzeltilmek yerine
+kayda geçirildi: TP/SL'yi ters bağlamam (replay −%99,9 raporladı) ve likidite
+sıralamasını TL enflasyonuyla kirletmem (bir sonucu tamamen tersine çevirmişti).
+
 ### Neden kaybediyor — tek cümlelik açıklama
 
 Her alım-satım sabit bir gişe parası ödetiyor (BingX'te yaklaşık %0,16).
