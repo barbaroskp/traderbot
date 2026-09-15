@@ -167,7 +167,8 @@ python -m src.cli export-csv --table orders
 
 ## Configuration
 
-All settings via environment variables or `.env` file:
+All settings are supplied via environment variables or a `.env` file. Defaults
+below are the values in `src/config.py`.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -175,19 +176,34 @@ All settings via environment variables or `.env` file:
 | `BINGX_API_SECRET` | (required) | BingX API secret |
 | `PAPER_MODE` | `true` | Paper trading mode |
 | `ALLOW_LIVE_TRADING` | `false` | Must be `true` for live |
-| `INITIAL_CAPITAL_USDT` | `50` | Starting capital |
-| `MAX_TOTAL_NOTIONAL_USDT` | `10` | Max total exposure |
-| `MAX_TRADE_NOTIONAL_USDT` | `3` | Max per-trade size |
-| `PER_TRADE_FRACTION` | `0.03` | Fraction of balance per trade |
-| `LEVERAGE` | `1` | Default leverage |
+| `INITIAL_CAPITAL_USDT` | `20` | Starting capital |
+| `MAX_TOTAL_MARGIN_PCT` | `0.30` | Max total margin, as a fraction of balance |
+| `MAX_TRADE_MARGIN_PCT` | `0.10` | Max margin per trade, as a fraction of balance |
+| `PER_TRADE_FRACTION` | `0.05` | Fraction of balance committed per trade |
+| `LEVERAGE` | `2` | Default leverage |
+| `LEVERAGE_HIGH_CONVICTION` | `3` | Leverage on high-conviction signals |
+| `MAX_LEVERAGE_ALLOWED` | `3` | Hard ceiling, enforced at startup |
 | `MARGIN_MODE` | `ISOLATED` | Margin mode |
-| `SCAN_INTERVAL_MINUTES` | `10` | Scan frequency |
-| `FAST_EMA` / `SLOW_EMA` | `9` / `21` | EMA periods |
-| `ENTRY_THRESHOLD_BPS` | `25` | Signal threshold (bps) |
-| `TP_BPS` / `SL_BPS` | `40` / `30` | Take-profit / Stop-loss (bps) |
+| `SCAN_INTERVAL_MINUTES` | `5` | Scan frequency |
+| `SIGNAL_MODE` | `thesis` | `thesis` (one family leads) or `vote` |
+| `PRIMARY_THESIS` | `trend` | Leading family in thesis mode |
+| `ENTRY_THRESHOLD_BPS` | `30` | Signal threshold (bps) |
+| `TP_BPS` / `SL_BPS` | `200` / `70` | Take-profit / stop-loss (bps) |
 | `MAX_OPEN_POSITIONS` | `2` | Max concurrent positions |
-| `MAX_HOLD_MINUTES` | `120` | Position timeout |
-| `COOLDOWN_MINUTES` | `20` | Post-trade cooldown |
+| `MAX_HOLD_MINUTES` | `180` | Position timeout |
+| `COOLDOWN_MINUTES` | `60` | Post-trade cooldown per symbol |
+| `FEE_RATE_BPS` | `5` | Taker fee per side |
+| `SLIPPAGE_ASSUMPTION_BPS` | `8` | Slippage assumed per side |
+| `MAX_SPREAD_BPS` | `8` | Selector: widest admissible spread |
+| `MIN_VOLUME_24H_USDT` | `50,000,000` | Selector: minimum 24h volume |
+
+> **Note on the margin variables.** These were once named
+> `MAX_TOTAL_NOTIONAL_USDT` and `MAX_TRADE_NOTIONAL_USDT`. They were renamed to
+> `*_PCT` while `pydantic-settings` was configured with `extra="ignore"`, so
+> existing `.env` files kept setting names the model no longer recognised — the
+> values were dropped in silence and the defaults applied 80% of balance at up
+> to 10x leverage. The configuration now uses `extra="forbid"`, which turns that
+> class of mistake into a startup error. See [POSTMORTEM.md](POSTMORTEM.md).
 
 ## Strategy
 
