@@ -53,6 +53,23 @@ def mock_market() -> AsyncMock:
     return market
 
 
+@pytest.fixture(autouse=True)
+def _selector_thresholds(cfg):
+    """Pin the thresholds this module's fixture data was written against.
+
+    These tests exercise the filter PIPELINE (ordering, stats, lenient
+    fallback), not the production limits. The shipped defaults
+    (max_spread_bps=8, min_depth_usdt=25_000, min_volume_24h_usdt=50M) are
+    deliberately restrictive because spread is paid as slippage; they are
+    validated against market data, not against hand-written fixtures.
+    """
+    cfg.max_spread_bps = 20.0
+    cfg.min_depth_usdt = 1_000.0
+    cfg.min_volume_24h_usdt = 5_000_000.0
+    cfg.selector_lenient_enabled = False
+    return cfg
+
+
 class TestSelector:
     @pytest.mark.asyncio
     async def test_filters_wide_spread(self, cfg, mock_universe, mock_market) -> None:

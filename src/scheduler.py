@@ -24,7 +24,14 @@ from typing import Any
 
 from src.bingx_client import BingXClient
 from src.config import Settings
-from src.execution import ExecutionAdapter, LiveExecution, PaperExecution, _compute_tp_sl_bps
+from src.execution import (
+    ExecutionAdapter,
+    LiveExecution,
+    PaperExecution,
+    _compute_tp_sl_bps,
+    _funding_cost_bps,
+    _hold_minutes,
+)
 from src.logger import get_logger, setup_logging
 from src.marketdata import MarketData, SymbolSnapshot
 from src.portfolio import Portfolio
@@ -328,20 +335,30 @@ class Scheduler:
                 # Skip trade if TP after fees doesn't provide positive expectancy
                 trade_type = getattr(sig, "trade_type", "scalp")
                 sl_bps, tp_bps = _compute_tp_sl_bps(self.cfg, snap, snap.mid_price, trade_type)
-                round_trip_fee_bps = 2.0 * self.cfg.fee_rate_bps
-                net_tp_bps = tp_bps - round_trip_fee_bps
-                net_sl_bps = sl_bps + round_trip_fee_bps
-                # Need net_tp / net_sl > 1.0 for positive expectancy (1.5 cok katiydi, cok sinyal engelliyordu)
-                if net_tp_bps <= 0 or (net_sl_bps > 0 and net_tp_bps / net_sl_bps < 1.0):
+                # Charge the FULL round trip (fees + slippage on both sides), not
+                # just fees, and express the gate as the win rate this setup would
+                # need to break even. A ratio test alone is not an expectancy
+                # test: R:R = 1.0 at a 50% win rate loses the friction every time.
+                cost_bps = self.cfg.round_trip_cost_bps
+                net_tp_bps = tp_bps - cost_bps
+                net_sl_bps = sl_bps + cost_bps
+                required_win_rate = (
+                    net_sl_bps / (net_tp_bps + net_sl_bps)
+                    if (net_tp_bps + net_sl_bps) > 0
+                    else 1.0
+                )
+                if net_tp_bps <= 0 or required_win_rate > self.cfg.expectancy_max_required_win_rate:
                     log.warning(
-                        "fee-adjusted expectancy guard: skipping low-expectancy trade",
+                        "expectancy guard: required win rate too high, skipping",
                         extra={
                             "symbol": sig.symbol,
                             "tp_bps": round(tp_bps, 1),
                             "sl_bps": round(sl_bps, 1),
+                            "round_trip_cost_bps": round(cost_bps, 1),
                             "net_tp_bps": round(net_tp_bps, 1),
                             "net_sl_bps": round(net_sl_bps, 1),
-                            "ratio": round(net_tp_bps / net_sl_bps, 2) if net_sl_bps > 0 else 0,
+                            "required_win_rate": round(required_win_rate, 3),
+                            "max_allowed": self.cfg.expectancy_max_required_win_rate,
                         },
                     )
                     continue
@@ -666,10 +683,19 @@ class Scheduler:
                 if mark <= 0:
                     mark = entry
                 pnl = (mark - entry) * qty if side == "LONG" else (entry - mark) * qty
-                # Deduct fees for consistency with execution layer
+                # Same cost model as the execution layer: fees on both sides plus
+                # the funding accrued while the position was open.
+                now_dt = datetime.now(timezone.utc)
                 entry_fee = entry * qty * (self.cfg.fee_rate_bps / 10_000)
                 exit_fee = mark * qty * (self.cfg.fee_rate_bps / 10_000)
-                pnl -= entry_fee + exit_fee
+                funding_bps = _funding_cost_bps(
+                    self.cfg,
+                    float(pos.get("funding_rate") or 0.0),
+                    side,
+                    _hold_minutes(str(pos.get("opened_at", "")), now_dt),
+                )
+                funding_fee = entry * qty * (funding_bps / 10_000)
+                pnl -= entry_fee + exit_fee + funding_fee
                 self.db.execute(
                     "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=? WHERE id=?",
                     (pnl, datetime.now(timezone.utc).isoformat(), pos["id"]),

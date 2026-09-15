@@ -52,11 +52,48 @@ def _compute_tp_sl_bps(
         sl_bps = base_sl
         tp_bps = base_tp
 
-    # Floor TP so that after round-trip fees we have at least min_tp_net_bps net profit
-    round_trip_fee_bps = 2.0 * cfg.fee_rate_bps
-    tp_floor = round_trip_fee_bps + getattr(cfg, "min_tp_net_bps", 10.0)
+    # Floor TP so that hitting it is actually profitable AFTER the full round
+    # trip. This previously counted fees only; slippage is paid on both sides as
+    # well and is the larger term for anything but the tightest books, so a "TP"
+    # could still book a net loss.
+    tp_floor = cfg.round_trip_cost_bps + getattr(cfg, "min_tp_net_bps", 10.0)
     tp_bps = max(tp_bps, tp_floor)
     return sl_bps, tp_bps
+
+
+def _funding_cost_bps(
+    cfg: Settings, funding_rate: float, side: str, hold_minutes: float
+) -> float:
+    """Funding paid over a hold, in bps of notional. Positive = we pay.
+
+    Funding was previously not deducted anywhere — not in paper, not in live,
+    not in the backtest — even though positions are held for hours and swing
+    positions for up to a day (three funding events).
+    """
+    if not getattr(cfg, "use_funding_cost", True):
+        return 0.0
+    interval_minutes = max(1.0, cfg.funding_interval_hours * 60.0)
+    intervals = max(0.0, hold_minutes) / interval_minutes
+    if funding_rate:
+        rate_bps = funding_rate * 10_000.0
+        # A positive funding rate is paid by longs and received by shorts.
+        signed = rate_bps if side == "LONG" else -rate_bps
+    else:
+        # No rate recorded for this position: assume we pay the default rather
+        # than silently crediting the trade.
+        signed = abs(cfg.default_funding_rate_bps)
+    return signed * intervals
+
+
+def _hold_minutes(opened_at: str, now: datetime) -> float:
+    """Minutes a position has been open, tolerant of naive timestamps."""
+    try:
+        opened = datetime.fromisoformat(opened_at)
+    except (TypeError, ValueError):
+        return 0.0
+    if opened.tzinfo is None:
+        opened = opened.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - opened).total_seconds() / 60.0)
 
 
 def _estimate_liquidation_price(
@@ -372,6 +409,9 @@ class PaperExecution(ExecutionAdapter):
                 "opened_at": now,
                 "status": "OPEN",
                 "is_paper": 1,
+                # Captured at entry so the funding actually accrued over the
+                # hold can be deducted when the position closes.
+                "funding_rate": snap.funding_rate,
                 "trade_type": getattr(signal, "trade_type", "scalp"),
                 "max_hold_minutes": (
                     self.cfg.swing_max_hold_minutes if getattr(signal, "trade_type", "scalp") == "swing"
@@ -440,6 +480,12 @@ class PaperExecution(ExecutionAdapter):
                 (unrealised_pnl, pos["id"]),
             )
 
+            # NOTE: exit_reason must be initialised BEFORE the anti-liquidation
+            # check. It used to be reset to "" a few lines *after* that check
+            # assigned "ANTI_LIQUIDATION", which unconditionally discarded the
+            # decision — anti-liquidation never once fired in paper mode.
+            exit_reason = ""
+
             # ── Anti-liquidation check ─────────────────────────
             if self.cfg.anti_liquidation_enabled:
                 leverage = int(pos.get("leverage", self.cfg.leverage) or self.cfg.leverage)
@@ -469,8 +515,6 @@ class PaperExecution(ExecutionAdapter):
             )
 
             profit_bps = _profit_bps(side, entry, mark)
-
-            exit_reason = ""
 
             # ── Partial TP check ─────────────────────────────────
             if (
@@ -565,30 +609,56 @@ class PaperExecution(ExecutionAdapter):
                 except Exception:
                     pass  # don't block exit check on indicator fetch failure
 
-            # ── SL check ────────────────────────────────────────
+            # ── SL / TP check across the WHOLE poll interval ────
+            # Checking only the latest mark price misses any excursion that
+            # reverted between two polls, which is exactly where a live exchange
+            # stop would have filled. Use the interval high/low instead so paper
+            # and live agree on whether a level was touched, and fill at the
+            # level itself rather than at the current mark.
+            exit_price = mark
+            period_high, period_low = await self.market.fetch_recent_extremes(
+                symbol,
+                interval="1m",
+                limit=max(3, int(self.cfg.scan_interval_minutes) + 2),
+            )
+            if period_high <= 0 or period_low <= 0:
+                period_high = period_low = mark
+            period_high = max(period_high, mark)
+            period_low = min(period_low, mark)
+
             sl_order = self.db.fetch_one(
                 "SELECT * FROM orders WHERE client_order_id=? AND status='PENDING'",
                 (pos.get("sl_order_id", ""),),
             )
+            tp_order = self.db.fetch_one(
+                "SELECT * FROM orders WHERE client_order_id=? AND status='PENDING'",
+                (pos.get("tp_order_id", ""),),
+            )
+
+            sl_hit = False
+            tp_hit = False
+            sl_price = 0.0
+            tp_price = 0.0
             if sl_order:
                 sl_price = sl_order["price"]
-                if side == "LONG" and mark <= sl_price:
-                    exit_reason = "SL"
-                elif side == "SHORT" and mark >= sl_price:
-                    exit_reason = "SL"
-
-            # ── TP check ────────────────────────────────────────
-            if not exit_reason:
-                tp_order = self.db.fetch_one(
-                    "SELECT * FROM orders WHERE client_order_id=? AND status='PENDING'",
-                    (pos.get("tp_order_id", ""),),
+                sl_hit = (side == "LONG" and period_low <= sl_price) or (
+                    side == "SHORT" and period_high >= sl_price
                 )
-                if tp_order:
-                    tp_price = tp_order["price"]
-                    if side == "LONG" and mark >= tp_price:
-                        exit_reason = "TP"
-                    elif side == "SHORT" and mark <= tp_price:
-                        exit_reason = "TP"
+            if tp_order:
+                tp_price = tp_order["price"]
+                tp_hit = (side == "LONG" and period_high >= tp_price) or (
+                    side == "SHORT" and period_low <= tp_price
+                )
+
+            if not exit_reason:
+                # Both touched inside one interval: the order they occurred in is
+                # unknowable at this resolution, so assume the unfavourable one.
+                if sl_hit:
+                    exit_reason = "SL"
+                    exit_price = sl_price
+                elif tp_hit:
+                    exit_reason = "TP"
+                    exit_price = tp_price
 
             # ── Timeout check ───────────────────────────────────
             if not exit_reason:
@@ -601,7 +671,7 @@ class PaperExecution(ExecutionAdapter):
 
             if exit_reason:
                 closed.append(
-                    await self._close_position(pos, mark, exit_reason)
+                    await self._close_position(pos, exit_price, exit_reason)
                 )
 
         return closed
@@ -609,26 +679,43 @@ class PaperExecution(ExecutionAdapter):
     async def _close_position(
         self, pos: dict[str, Any], exit_price: float, reason: str
     ) -> dict[str, Any]:
-        """Close a paper position."""
-        now = datetime.now(timezone.utc).isoformat()
+        """Close a paper position, charging the full cost of the round trip."""
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
         entry = pos["entry_price"]
         qty = pos["qty"]
         side = pos["side"]
 
+        # Exit slippage. Entry slippage is already baked into the fill price at
+        # open, but the exit was previously assumed to fill exactly at the
+        # SL/TP level. Stop-market and take-profit-market orders cross the book
+        # too, always in the direction that hurts.
+        slip = self.cfg.slippage_assumption_bps / 10_000
         if side == "LONG":
-            pnl = (exit_price - entry) * qty
+            fill_exit = exit_price * (1 - slip)   # we are selling
+            pnl = (fill_exit - entry) * qty
         else:
-            pnl = (entry - exit_price) * qty
+            fill_exit = exit_price * (1 + slip)   # we are buying back
+            pnl = (entry - fill_exit) * qty
 
         # Fees: entry (on notional at open) + exit (on notional at close)
         entry_fee = entry * qty * (self.cfg.fee_rate_bps / 10_000)
-        exit_fee = exit_price * qty * (self.cfg.fee_rate_bps / 10_000)
-        pnl -= entry_fee + exit_fee
+        exit_fee = fill_exit * qty * (self.cfg.fee_rate_bps / 10_000)
 
-        # Update position (store exit_reason for analytics)
+        # Funding accrued over the hold — never charged anywhere before.
+        hold_min = _hold_minutes(pos.get("opened_at", ""), now_dt)
+        funding_bps = _funding_cost_bps(
+            self.cfg, float(pos.get("funding_rate") or 0.0), side, hold_min
+        )
+        funding_fee = entry * qty * (funding_bps / 10_000)
+
+        pnl -= entry_fee + exit_fee + funding_fee
+
+        # Update position (store exit_reason + cost breakdown for analytics)
         self.db.execute(
-            "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=?, exit_reason=? WHERE id=?",
-            (pnl, now, reason, pos["id"]),
+            "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=?, exit_reason=?, "
+            "exit_price=?, entry_fee=?, exit_fee=?, funding_fee=? WHERE id=?",
+            (pnl, now, reason, fill_exit, entry_fee, exit_fee, funding_fee, pos["id"]),
         )
 
         # Mark SL/TP orders as cancelled (the one that didn't trigger)
@@ -648,13 +735,17 @@ class PaperExecution(ExecutionAdapter):
                 "side": side,
                 "reason": reason,
                 "entry": entry,
-                "exit": exit_price,
+                "exit": fill_exit,
                 "pnl": round(pnl, 4),
                 "qty": qty,
+                "entry_fee": round(entry_fee, 6),
+                "exit_fee": round(exit_fee, 6),
+                "funding_fee": round(funding_fee, 6),
+                "hold_min": round(hold_min, 1),
             },
         )
 
-        return {**pos, "realised_pnl": pnl, "exit_price": exit_price, "exit_reason": reason}
+        return {**pos, "realised_pnl": pnl, "exit_price": fill_exit, "exit_reason": reason}
 
     def _apply_partial_tp(
         self,
@@ -777,6 +868,47 @@ class LiveExecution(ExecutionAdapter):
         self.market = market
         self.risk = risk
         self.universe = universe
+
+    def _settle(
+        self, pos: dict[str, Any], exit_price: float, qty: float, now: datetime
+    ) -> tuple[float, dict[str, float]]:
+        """Net realised PnL for a live close, after fees AND funding.
+
+        Every live close path (exchange fill, anti-liquidation, momentum exit,
+        timeout) previously duplicated this arithmetic and all four omitted
+        funding, so a position held for hours reported a PnL that had never paid
+        for the time it was open. Centralised so the four paths cannot drift.
+        """
+        entry = float(pos["entry_price"])
+        side = str(pos["side"])
+        gross = (exit_price - entry) * qty if side == "LONG" else (entry - exit_price) * qty
+        entry_fee = entry * qty * (self.cfg.fee_rate_bps / 10_000)
+        exit_fee = exit_price * qty * (self.cfg.fee_rate_bps / 10_000)
+        hold_min = _hold_minutes(str(pos.get("opened_at", "")), now)
+        funding_bps = _funding_cost_bps(
+            self.cfg, float(pos.get("funding_rate") or 0.0), side, hold_min
+        )
+        funding_fee = entry * qty * (funding_bps / 10_000)
+        net = gross - entry_fee - exit_fee - funding_fee
+        return net, {
+            "entry_fee": entry_fee,
+            "exit_fee": exit_fee,
+            "funding_fee": funding_fee,
+        }
+
+    def _record_close(
+        self, pos: dict[str, Any], exit_price: float, pnl: float,
+        costs: dict[str, float], reason: str, now: datetime,
+    ) -> None:
+        """Persist a live close with its full cost breakdown."""
+        self.db.execute(
+            "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=?, exit_reason=?, "
+            "exit_price=?, entry_fee=?, exit_fee=?, funding_fee=? WHERE id=?",
+            (
+                pnl, now.isoformat(), reason, exit_price,
+                costs["entry_fee"], costs["exit_fee"], costs["funding_fee"], pos["id"],
+            ),
+        )
 
     async def execute_signal(
         self,
@@ -975,6 +1107,27 @@ class LiveExecution(ExecutionAdapter):
             "WHERE client_order_id=?",
             (db_status, filled_qty, avg_price, now, client_oid),
         )
+
+        # Record the live fill. Only paper mode wrote to `fills`, so live runs
+        # had no per-fill record to reconcile against the exchange or to audit
+        # commission with.
+        if filled_qty > 0:
+            order_row = self.db.fetch_one(
+                "SELECT id FROM orders WHERE client_order_id=?", (client_oid,)
+            )
+            self.db.insert(
+                "fills",
+                {
+                    "order_id": order_row["id"] if order_row else 0,
+                    "ts": now,
+                    "symbol": signal.symbol,
+                    "side": signal.side,
+                    "price": avg_price,
+                    "qty": filled_qty,
+                    "fee": avg_price * filled_qty * (self.cfg.fee_rate_bps / 10_000),
+                    "is_paper": 0,
+                },
+            )
 
         if filled_qty <= 0:
             log.warning("live: market order not filled after retries", extra={"oid": client_oid})
@@ -1199,6 +1352,7 @@ class LiveExecution(ExecutionAdapter):
                 "opened_at": now,
                 "status": "OPEN",
                 "is_paper": 0,
+                "funding_rate": snap.funding_rate,
                 "trade_type": getattr(signal, "trade_type", "scalp"),
                 "max_hold_minutes": (
                     self.cfg.swing_max_hold_minutes if getattr(signal, "trade_type", "scalp") == "swing"
@@ -1266,14 +1420,8 @@ class LiveExecution(ExecutionAdapter):
                 # Position was closed by SL/TP on exchange
                 mark = await self.market.fetch_mark_price(symbol)
                 qty = float(pos.get("remaining_qty", pos["qty"]))
-                pnl = (mark - entry) * qty if side == "LONG" else (entry - mark) * qty
-                entry_fee = entry * qty * (self.cfg.fee_rate_bps / 10_000)
-                exit_fee = mark * qty * (self.cfg.fee_rate_bps / 10_000)
-                pnl -= entry_fee + exit_fee
-                self.db.execute(
-                    "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=?, exit_reason=? WHERE id=?",
-                    (pnl, now.isoformat(), "exchange_close", pos["id"]),
-                )
+                pnl, costs = self._settle(pos, mark, qty, now)
+                self._record_close(pos, mark, pnl, costs, "exchange_close", now)
                 closed.append({**pos, "realised_pnl": pnl, "exit_reason": "exchange_close"})
                 continue
 
@@ -1309,14 +1457,8 @@ class LiveExecution(ExecutionAdapter):
                             order_type="MARKET", quantity=exch_qty,
                         )
                         mark = await self.market.fetch_mark_price(symbol)
-                        pnl = (mark - entry) * exch_qty if side == "LONG" else (entry - mark) * exch_qty
-                        entry_fee = entry * exch_qty * (self.cfg.fee_rate_bps / 10_000)
-                        exit_fee = mark * exch_qty * (self.cfg.fee_rate_bps / 10_000)
-                        pnl -= entry_fee + exit_fee
-                        self.db.execute(
-                            "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=?, exit_reason=? WHERE id=?",
-                            (pnl, now.isoformat(), "ANTI_LIQUIDATION", pos["id"]),
-                        )
+                        pnl, costs = self._settle(pos, mark, exch_qty, now)
+                        self._record_close(pos, mark, pnl, costs, "ANTI_LIQUIDATION", now)
                         closed.append({**pos, "realised_pnl": pnl, "exit_reason": "ANTI_LIQUIDATION"})
                         continue
                     except BingXClientError as exc:
@@ -1442,14 +1584,8 @@ class LiveExecution(ExecutionAdapter):
                         quantity=exch_qty,
                     )
                     mark = await self.market.fetch_mark_price(symbol)
-                    pnl = (mark - entry) * exch_qty if side == "LONG" else (entry - mark) * exch_qty
-                    entry_fee = entry * exch_qty * (self.cfg.fee_rate_bps / 10_000)
-                    exit_fee = mark * exch_qty * (self.cfg.fee_rate_bps / 10_000)
-                    pnl -= entry_fee + exit_fee
-                    self.db.execute(
-                        "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=?, exit_reason=? WHERE id=?",
-                        (pnl, now.isoformat(), "MOMENTUM_EXIT", pos["id"]),
-                    )
+                    pnl, costs = self._settle(pos, mark, exch_qty, now)
+                    self._record_close(pos, mark, pnl, costs, "MOMENTUM_EXIT", now)
                     closed.append({**pos, "realised_pnl": pnl, "exit_reason": "MOMENTUM_EXIT"})
                     continue
                 except BingXClientError as exc:
@@ -1470,15 +1606,8 @@ class LiveExecution(ExecutionAdapter):
                         quantity=exch_qty,
                     )
                     mark = await self.market.fetch_mark_price(symbol)
-                    pnl = (mark - entry) * exch_qty if side == "LONG" else (entry - mark) * exch_qty
-                    entry_fee = entry * exch_qty * (self.cfg.fee_rate_bps / 10_000)
-                    exit_fee = mark * exch_qty * (self.cfg.fee_rate_bps / 10_000)
-                    pnl -= entry_fee + exit_fee
-                    self.db.execute(
-                        "UPDATE positions SET status='CLOSED', realised_pnl=?, closed_at=?, exit_reason=? "
-                        "WHERE id=?",
-                        (pnl, now.isoformat(), "TIMEOUT", pos["id"]),
-                    )
+                    pnl, costs = self._settle(pos, mark, exch_qty, now)
+                    self._record_close(pos, mark, pnl, costs, "TIMEOUT", now)
                     closed.append({**pos, "realised_pnl": pnl, "exit_reason": "TIMEOUT"})
                 except BingXClientError as exc:
                     log.error("live: timeout close failed", extra={"error": str(exc)})

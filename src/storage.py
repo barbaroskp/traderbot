@@ -6,6 +6,7 @@ Thread-safe via check_same_thread=False + serialised writes.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -151,6 +152,38 @@ CREATE TABLE IF NOT EXISTS errors (
     message     TEXT,
     traceback   TEXT
 );
+
+-- Allocator state. This MUST be persisted rather than recomputed: peak_equity
+-- is the high-water mark the drawdown brake measures against, so recomputing
+-- it from current equity on startup would re-arm the brake at the already
+-- depressed level and quietly disable it. See src/allocator.py.
+CREATE TABLE IF NOT EXISTS allocator_state (
+    book                TEXT PRIMARY KEY,   -- allows more than one book per DB
+    stance              TEXT NOT NULL,      -- INVESTED | DEFENSIVE
+    peak_equity         REAL NOT NULL DEFAULT 0,
+    defensive_index_low REAL NOT NULL DEFAULT 0,
+    last_rebalance_at   TEXT,
+    deployed            INTEGER NOT NULL DEFAULT 0,
+    updated_at          TEXT NOT NULL
+);
+
+-- Append-only record of what the allocator decided and why. Written in dry-run
+-- exactly as in live, so a dry run produces a reviewable decision history
+-- rather than only log lines.
+CREATE TABLE IF NOT EXISTS allocator_decisions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              TEXT    NOT NULL,
+    book            TEXT    NOT NULL,
+    dry_run         INTEGER NOT NULL DEFAULT 1,
+    rebalance       INTEGER NOT NULL,
+    reason          TEXT,
+    stance          TEXT    NOT NULL,
+    equity_quote    REAL,
+    drawdown_pct    REAL,
+    turnover_quote  REAL,
+    intents_json    TEXT,
+    note            TEXT
+);
 """
 
 
@@ -225,6 +258,20 @@ class Storage:
         # Positions: exit reason tracking (SL/TP/TIMEOUT/MOMENTUM_EXIT/ANTI_LIQUIDATION/TRAILING)
         if "exit_reason" not in pos_cols:
             conn.execute("ALTER TABLE positions ADD COLUMN exit_reason TEXT")
+        # Positions: cost accounting. funding_rate is captured at entry so the
+        # funding actually paid over the hold can be deducted at close; the fee
+        # columns make the friction per trade auditable after the fact instead of
+        # having to re-derive it from notional.
+        if "funding_rate" not in pos_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN funding_rate REAL DEFAULT 0")
+        if "entry_fee" not in pos_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN entry_fee REAL DEFAULT 0")
+        if "exit_fee" not in pos_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN exit_fee REAL DEFAULT 0")
+        if "funding_fee" not in pos_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN funding_fee REAL DEFAULT 0")
+        if "exit_price" not in pos_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN exit_price REAL")
 
         # Orders: TP level
         if "tp_level" not in ord_cols:
@@ -392,6 +439,86 @@ class Storage:
         if self.db_path.exists():
             return self.db_path.stat().st_size / (1024 * 1024)
         return 0.0
+
+    # ── Allocator persistence ───────────────────────────────────
+
+    def save_allocator_state(self, book: str, state: dict[str, Any]) -> None:
+        """Upsert the allocator's state for one book.
+
+        Called after EVERY cycle, not only on rebalance, because peak_equity
+        moves on any new high and losing it means losing the brake's reference
+        point.
+        """
+        conn = self._get_conn()
+        conn.execute(
+            """
+            INSERT INTO allocator_state
+                (book, stance, peak_equity, defensive_index_low,
+                 last_rebalance_at, deployed, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(book) DO UPDATE SET
+                stance              = excluded.stance,
+                peak_equity         = excluded.peak_equity,
+                defensive_index_low = excluded.defensive_index_low,
+                last_rebalance_at   = excluded.last_rebalance_at,
+                deployed            = excluded.deployed,
+                updated_at          = excluded.updated_at
+            """,
+            (
+                book,
+                state["stance"],
+                float(state.get("peak_equity") or 0.0),
+                float(state.get("defensive_index_low") or 0.0),
+                state.get("last_rebalance_at"),
+                1 if state.get("deployed") else 0,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.commit()
+
+    def load_allocator_state(self, book: str) -> dict[str, Any] | None:
+        """Return the stored state for a book, or None if it has never run."""
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM allocator_state WHERE book = ?", (book,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "stance": row["stance"],
+            "peak_equity": row["peak_equity"],
+            "defensive_index_low": row["defensive_index_low"],
+            "last_rebalance_at": row["last_rebalance_at"],
+            "deployed": bool(row["deployed"]),
+        }
+
+    def log_allocation_decision(self, book: str, dry_run: bool,
+                                decision: dict[str, Any]) -> int:
+        """Append one decision. Never updates: the history is the audit trail."""
+        conn = self._get_conn()
+        cur = conn.execute(
+            """
+            INSERT INTO allocator_decisions
+                (ts, book, dry_run, rebalance, reason, stance, equity_quote,
+                 drawdown_pct, turnover_quote, intents_json, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                book,
+                1 if dry_run else 0,
+                1 if decision.get("rebalance") else 0,
+                decision.get("reason"),
+                decision.get("stance"),
+                decision.get("equity_quote"),
+                decision.get("drawdown_pct"),
+                decision.get("turnover_quote"),
+                json.dumps(decision.get("intents", [])),
+                decision.get("note"),
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid or 0)
 
     def close(self) -> None:
         if self._conn:

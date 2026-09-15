@@ -20,6 +20,16 @@ from src.universe import Universe
 def mock_market(cfg, db) -> AsyncMock:
     market = AsyncMock(spec=MarketData)
     market.fetch_mark_price.return_value = 50000.0
+
+    # Paper execution checks the interval HIGH/LOW rather than only the latest
+    # mark, so a stop or target touched between two polls is not missed the way
+    # it used to be. Mirror the mark price by default; tests that need an
+    # intra-interval excursion override the side_effect explicitly.
+    async def _extremes(symbol, interval="1m", limit=10):
+        mark = market.fetch_mark_price.return_value
+        return (mark, mark)
+
+    market.fetch_recent_extremes.side_effect = _extremes
     return market
 
 

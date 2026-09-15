@@ -311,16 +311,32 @@ class RiskManager:
             return None
 
         win_loss_ratio = avg_win / avg_loss
-        kelly = (win_loss_ratio * p - q) / win_loss_ratio
+        raw_kelly = (win_loss_ratio * p - q) / win_loss_ratio
 
-        # Apply fractional Kelly (half-Kelly default)
-        kelly *= self.cfg.kelly_fraction
+        # A non-positive Kelly means the measured edge is NEGATIVE and the
+        # optimal bet size is zero. This used to clamp up to kelly_min_fraction,
+        # so the bot carried on sizing positions while its own closed-trade
+        # history said it was losing — the exact failure Kelly exists to prevent.
+        if raw_kelly <= 0:
+            log.warning(
+                "kelly: measured edge is negative — sizing to zero",
+                extra={
+                    "win_rate": round(p, 3),
+                    "avg_win": round(avg_win, 4),
+                    "avg_loss": round(avg_loss, 4),
+                    "raw_kelly": round(raw_kelly, 4),
+                    "trades_used": len(trades),
+                },
+            )
+            if self.cfg.kelly_block_on_negative_edge:
+                return 0.0
+            return self.cfg.kelly_min_fraction
+
+        # Apply fractional Kelly
+        kelly = raw_kelly * self.cfg.kelly_fraction
 
         # Clamp to configured bounds
         kelly = max(self.cfg.kelly_min_fraction, min(self.cfg.kelly_max_fraction, kelly))
-
-        if kelly <= 0:
-            return self.cfg.kelly_min_fraction
 
         log.debug(
             "kelly sizing",
@@ -366,6 +382,15 @@ class RiskManager:
         # ── Kelly Criterion sizing (highest priority when available) ──
         kelly_f = self._compute_kelly_fraction()
         if kelly_f is not None:
+            # Zero fraction = proven negative edge. Refuse the trade outright;
+            # falling through to min_margin here would silently reinstate a
+            # position size Kelly just told us not to take.
+            if kelly_f <= 0:
+                log.warning(
+                    "position sizing blocked: kelly fraction is zero (negative measured edge)",
+                    extra={"balance": self._current_balance},
+                )
+                return 0.0
             kelly_margin = max(min_margin, self._current_balance * kelly_f)
             kelly_margin = min(kelly_margin, max_trade_margin, remaining_margin)
             notional = kelly_margin * leverage

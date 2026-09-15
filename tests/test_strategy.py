@@ -14,8 +14,23 @@ from src.strategy import Strategy, _is_near_funding_time
 
 @pytest.fixture()
 def strategy_cfg(cfg) -> Settings:
-    """Test config with time-dependent filters disabled for deterministic tests."""
-    cfg.avoid_funding_window = False  # disable since tests can run at any time
+    """Config for the per-indicator VOTE tests.
+
+    These cases assert how individual indicators vote and how votes roll up into
+    clusters. They are not a statement about the production entry bar: the
+    shipped defaults (4-of-6 clusters, weighted-score floor, regime filter) are
+    intentionally restrictive and are validated against market data, not against
+    hand-built snapshots that only populate a handful of indicators.
+
+    ``TestProductionGates`` below exercises the shipped defaults directly.
+    """
+    cfg.avoid_funding_window = False   # tests can run at any time of day
+    cfg.min_cluster_confluence = 2     # fixtures only populate a few clusters
+    cfg.min_weighted_score_no_ema = 0.0
+    cfg.use_regime_filter = False
+    cfg.rsi_full_vote_only = False     # exercise the partial-zone RSI votes too
+    cfg.min_depth_usdt = 1_000.0       # _make_snap builds 5k-depth books
+    cfg.max_open_positions = 5         # several cases seed 2 open positions
     return cfg
 
 
@@ -240,6 +255,18 @@ class TestMomentumConfirmation:
 
 
 class TestModeAwareEmaGate:
+    """The EMA-anchor gate belongs to the legacy majority-vote path.
+
+    Under ``signal_mode="thesis"`` direction comes from the primary thesis
+    cluster and no other rule may flip it, so ``require_ema_in_*`` has nothing to
+    act on. These cases pin the vote-mode behaviour explicitly.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _vote_mode(self, strategy_cfg):
+        strategy_cfg.signal_mode = "vote"
+        return strategy_cfg
+
     def test_mean_reversion_requires_ema_when_enabled(self, strategy_cfg, db) -> None:
         """When require_ema_in_confluence=True, mean-reversion requires EMA anchor."""
         strategy_cfg.require_ema_in_confluence = True  # explicitly enable

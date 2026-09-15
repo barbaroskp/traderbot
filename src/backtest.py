@@ -31,6 +31,7 @@ from typing import Any
 
 from src.bingx_client import BingXClient
 from src.config import Settings
+from src.execution import _funding_cost_bps
 from src.logger import get_logger
 from src.marketdata import Indicators, MarketData, SymbolSnapshot
 from src.risk import RiskManager, RiskState
@@ -298,26 +299,35 @@ class BacktestEngine:
         high = float(current.get("high", current.get("h", 0)))
         low = float(current.get("low", current.get("l", 0)))
         volume = float(current.get("volume", current.get("v", 0)))
+        open_ = float(current.get("open", current.get("o", 0)))
 
         if close <= 0:
             return None
+
+        # Fill reference price. Indicators come from `window`, i.e. candles up to
+        # and including the PREVIOUS close, so the decision is made the moment
+        # that candle closes and the fill happens at the NEXT candle's open.
+        # Using this candle's close instead let the backtest transact a full bar
+        # after the signal, at a price that already contained the bar's move.
+        ref_price = open_ if open_ > 0 else close
 
         # Use kline-based EMA for z-score (same as live bot)
         fast_ema = indicators.kline_fast_ema
         slow_ema = indicators.kline_slow_ema
         z_score_bps = indicators.kline_z_score_bps
 
-        # Simulate reasonable spread and depth (backtest doesn't have live orderbook)
-        spread_bps = 5.0  # typical 5 bps spread
-        bid_depth = 10000.0  # assume decent liquidity
-        ask_depth = 10000.0
+        # No historical order book: assume a spread consistent with the pairs the
+        # live selector would actually admit, and depth at the live minimum.
+        spread_bps = self.cfg.backtest_assumed_spread_bps
+        bid_depth = self.cfg.min_depth_usdt
+        ask_depth = self.cfg.min_depth_usdt
 
         snap = SymbolSnapshot(
             symbol=symbol,
-            mid_price=close,
-            mark_price=close,
-            best_bid=close * (1 - spread_bps / 20_000),
-            best_ask=close * (1 + spread_bps / 20_000),
+            mid_price=ref_price,
+            mark_price=ref_price,
+            best_bid=ref_price * (1 - spread_bps / 20_000),
+            best_ask=ref_price * (1 + spread_bps / 20_000),
             spread_bps=spread_bps,
             bid_depth_usdt=bid_depth,
             ask_depth_usdt=ask_depth,
@@ -351,7 +361,15 @@ class BacktestEngine:
         if qty <= 0:
             return
 
-        entry_price = snap.mid_price
+        # Entry slippage. The backtest previously filled at the mid price, i.e.
+        # assumed zero cost to cross the book, while live entries are MARKET
+        # orders. On a strategy whose gross edge is small, that single omission
+        # is the difference between "profitable in backtest" and "bleeding live".
+        slip = self.cfg.slippage_assumption_bps / 10_000
+        if signal.side == "LONG":
+            entry_price = snap.mid_price * (1 + slip)
+        else:
+            entry_price = snap.mid_price * (1 - slip)
         notional = entry_price * qty
 
         # Compute SL/TP (same logic as execution.py)
@@ -497,15 +515,30 @@ class BacktestEngine:
         reason: str,
         ts: datetime,
     ) -> None:
-        """Close a virtual position and record the trade."""
+        """Close a virtual position and record the trade, charging full costs."""
+        # Exit slippage: stop-market and take-profit-market orders cross the book
+        # too. Filling exactly at the SL/TP level overstates every exit.
+        slip = self.cfg.slippage_assumption_bps / 10_000
         if pos.side == "LONG":
-            pnl = (exit_price - pos.entry_price) * pos.qty
+            fill_exit = exit_price * (1 - slip)
+            pnl = (fill_exit - pos.entry_price) * pos.qty
         else:
-            pnl = (pos.entry_price - exit_price) * pos.qty
+            fill_exit = exit_price * (1 + slip)
+            pnl = (pos.entry_price - fill_exit) * pos.qty
 
-        # Exit fee
-        fee = exit_price * pos.qty * (self.cfg.fee_rate_bps / 10_000)
-        pnl -= fee
+        # Exit fee (the entry fee was already charged to capital at open)
+        fee = fill_exit * pos.qty * (self.cfg.fee_rate_bps / 10_000)
+
+        # Funding over the hold. Historical per-symbol rates are not fetched, so
+        # _funding_cost_bps falls back to the configured default as a cost. This
+        # was previously ignored entirely, which flattered every multi-hour trade
+        # and every 24h swing (three funding events).
+        hold_minutes = max(0.0, (ts - pos.opened_at).total_seconds() / 60.0)
+        funding_bps = _funding_cost_bps(self.cfg, 0.0, pos.side, hold_minutes)
+        funding_fee = pos.entry_price * pos.qty * (funding_bps / 10_000)
+
+        pnl -= fee + funding_fee
+        exit_price = fill_exit
 
         self.capital += pnl
         if self.capital > self.peak_capital:

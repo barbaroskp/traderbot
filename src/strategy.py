@@ -1,10 +1,15 @@
 """Multi-indicator cluster confluence strategy.
 
-Signal generation uses 22 indicators grouped into 7 clusters.  Each cluster
-requires internal consensus (2+ members agreeing) before casting a single
-cluster vote.  A trade is taken when enough *clusters* agree (default 2/6).
-This prevents redundant indicators (RSI/StochRSI/WillR) from inflating
-confluence and ensures each vote represents a genuinely different data source.
+Signal generation uses 23 indicators grouped into 6 voting clusters plus one
+bonus-only cluster.  Each cluster requires internal consensus (2+ members
+agreeing) before casting a single cluster vote.  A trade is taken when enough
+*clusters* agree (default 4/6).  This prevents redundant indicators
+(RSI/StochRSI/WillR) from inflating confluence and ensures each vote represents
+a genuinely different data source.
+
+Clusters are also grouped by market hypothesis so that mean-reverting and
+trend-following evidence stay separable rather than cancelling each other out
+inside a single bucket — see CLUSTER_MEMBERS below.
 
 Indicators:
   1. EMA Z-Score: Mean-reversion signal based on price deviation from fast EMA (kline-based)
@@ -40,6 +45,7 @@ Additional filters & bonuses:
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -78,14 +84,38 @@ class ClusterVote:
 # Each cluster groups indicators that measure the same underlying concept.
 # A cluster votes only when enough internal members agree (2/3 or 2/2).
 # This prevents redundant indicators from inflating confluence.
+# Clusters are grouped so that each one represents a single, coherent market
+# hypothesis. This matters: the previous "trend" cluster contained BOTH
+# ema_zscore (mean reversion: price below the fast EMA is a BUY because it
+# should revert) AND trend/adx (trend following: price above EMA50 is a BUY
+# because it should persist). Those are contradictory theories of how price
+# behaves, and putting them in one cluster let an arbitrary internal majority
+# decide the direction while hiding the disagreement from the confluence count.
+#
+# They now live in separate clusters, so they are allowed to disagree openly and
+# the confluence requirement (4 of 6) is what forces them to line up. When
+# mean_revert and trend BOTH point the same way you have a pullback inside a
+# trend — a coherent setup — rather than two incompatible signals cancelling out
+# inside one bucket.
 CLUSTER_MEMBERS: dict[str, list[str]] = {
+    # ── Mean-reverting family: price is stretched away from a reference level ──
     "oscillator":  ["rsi", "stoch_rsi", "williams_r", "rsi_divergence"],  # overbought/oversold
-    "momentum":    ["macd", "obv", "momentum", "velocity"],               # momentum/volume flow
-    "trend":       ["ema_zscore", "trend", "adx"],                        # direction/strength
-    "volatility":  ["bollinger", "squeeze", "breakout", "volume_spike"],  # vol regime/breakout
+    "mean_revert": ["ema_zscore", "bollinger", "vwap", "volume_profile"], # price vs fair level
+    # ── Trend-following family: direction is expected to persist ──
+    "trend":       ["trend", "adx", "macd", "momentum"],                  # direction/strength
+    # ── Regime / expansion ──
+    # volume_profile_break is the BREAKOUT reading of the volume profile and
+    # belongs here, not with the reversion reading in mean_revert.
+    "volatility":  ["squeeze", "breakout", "volume_spike", "velocity",
+                    "volume_profile_break"],                              # vol regime/breakout
+    # ── Positioning and book pressure ──
     "orderflow":   ["orderbook", "taker_ratio", "whale"],                 # market depth
-    "contrarian":  ["open_interest", "liq_cascade", "sentiment"],         # contra signals (bonus only)
-    "vwap":        ["vwap", "volume_profile"],                            # institutional levels
+    "flow":        ["obv", "open_interest", "liq_cascade"],               # volume / OI flow
+    # ── Bonus only, never votes on its own ──
+    # sentiment is driven partly by the Fear & Greed index, which is a DAILY,
+    # MARKET-WIDE number: identical for every symbol. It is a portfolio-level
+    # tilt, not per-symbol evidence, so it must not count toward confluence.
+    "contrarian":  ["sentiment"],
 }
 
 # Contrarian cluster doesn't vote independently — it adds bonus/penalty
@@ -156,6 +186,10 @@ class Strategy:
         self.cfg = cfg
         self.db = db
         self._cooldowns: dict[str, datetime] = {}
+        # Why candidates were discarded BEFORE a Signal object exists. Without
+        # this the cycle log could only say "no candidate reached confluence",
+        # which is what made the filters get loosened blind.
+        self._gate_stats: Counter[str] = Counter()
 
     def generate_signals(
         self,
@@ -165,6 +199,7 @@ class Strategy:
     ) -> list[Signal]:
         """Score all snapshots and return accepted signals."""
         now = datetime.now(timezone.utc)
+        self._gate_stats.clear()
         open_symbols = {p["symbol"] for p in open_positions}
         signals: list[Signal] = []
         # Prevent over-allocation within the same cycle by counting
@@ -186,8 +221,15 @@ class Strategy:
                 open_positions=open_positions,
                 risk_state=risk_state,
             )
-            if signal:
-                signals.append(signal)
+            if signal is None:
+                continue
+            # Rejected candidates are returned too (not swallowed as None) so the
+            # reject_reasons histogram below is actually populated. Without it the
+            # operator can never see WHY a cycle produced no trades, which is how
+            # filters ended up being loosened blind.
+            signals.append(signal)
+            if signal.accepted:
+                # Rejected signals were already persisted inside _evaluate_snapshot.
                 self._persist_signal(signal)
                 open_count_simulated += 1
 
@@ -207,8 +249,11 @@ class Strategy:
                 "signals": len(signals),
                 "accepted": accepted_count,
                 "risk_state": risk_state,
+                "signal_mode": self.cfg.signal_mode,
+                "primary_thesis": self.cfg.primary_thesis,
                 "min_confluence": min_confluence,
                 **({"reject_reasons": reject_counts} if reject_counts else {}),
+                **({"gates": dict(self._gate_stats)} if self._gate_stats else {}),
             },
         )
         if not accepted_count and reject_counts:
@@ -242,8 +287,16 @@ class Strategy:
             return None
 
         z = snap.z_score_bps
-        # Skip extreme z-score (breakout, not mean reversion)
-        if abs(z) > self.cfg.max_z_score_bps:
+        # An extreme z-score means price has run a long way from the fast EMA.
+        # That invalidates a MEAN-REVERSION entry, but it is precisely what a
+        # trend/breakout entry wants. Applying the gate unconditionally meant the
+        # bot carried breakout machinery (breakout, squeeze, volume_profile_break)
+        # while throwing away the very moves that machinery exists to catch.
+        gate_extremes = (
+            self.cfg.signal_mode != "thesis" or self.cfg.primary_thesis == "mean_revert"
+        )
+        if gate_extremes and abs(z) > self.cfg.max_z_score_bps:
+            self._gate_stats["z_score_extreme"] += 1
             return None
 
         # ── Compute indicator votes ───────────────────────────
@@ -285,11 +338,19 @@ class Strategy:
         require_ema = self._require_ema_for_mode(mode)
         ema_vote = next((v for v in votes if v.name == "ema_zscore"), None)
 
-        # Cluster confluence threshold (default 2 out of 6 voting clusters)
-        min_cluster_confluence = getattr(self.cfg, "min_cluster_confluence", 2)
+        # Cluster confluence threshold. Use the value resolved by the caller so
+        # that the risk state actually tightens the gate (and so that the value
+        # reported in logs is the one being enforced).
+        min_cluster_confluence = min_confluence
 
-        if require_ema:
+        if self.cfg.signal_mode == "thesis":
+            resolved = self._resolve_by_thesis(cluster_votes)
+            if resolved is None:
+                return None
+            side, confluence_score, weighted_score = resolved
+        elif require_ema:
             if not ema_vote or ema_vote.side == "NEUTRAL":
+                self._gate_stats["no_ema_anchor"] += 1
                 return None
             # EMA is part of the trend cluster; check cluster confluence
             if (ema_vote.side == "LONG" and long_cluster_count >= min_cluster_confluence
@@ -337,6 +398,16 @@ class Strategy:
         # full config weight.  Normalize by dividing by the maximum possible
         # weight of the indicators that actually voted on the winning side.
         weighted_score, _raw = self._normalize_weighted_score(votes, side)
+        # Breadth factor. Agreement quality alone is not conviction: two
+        # unopposed indicators are trivially "100% agreed" while the other
+        # twenty stay silent. Scaling by the share of voting clusters that
+        # actually agreed makes the score increase with BOTH agreement and
+        # breadth, which is the property position sizing and leverage need.
+        # Without it, sparse evidence outscored broad evidence and the bot
+        # sized UP into its weakest signals.
+        voting_clusters = len(CLUSTER_MEMBERS) - len(BONUS_ONLY_CLUSTERS)
+        if voting_clusters > 0:
+            weighted_score *= min(confluence_score, voting_clusters) / voting_clusters
         # Apply momentum discount on normalized score (same effect as before)
         if self.cfg.require_momentum_confirmation and indicators.valid:
             if not momentum_confirmed:
@@ -396,28 +467,28 @@ class Strategy:
             signal.accepted = False
             signal.reject_reason = "position_exists"
             self._persist_signal(signal)
-            return None
+            return signal
 
         # Max positions reached
         if open_count >= max_positions:
             signal.accepted = False
             signal.reject_reason = "max_positions"
             self._persist_signal(signal)
-            return None
+            return signal
 
         # Cooldown
         if self._in_cooldown(symbol, now):
             signal.accepted = False
             signal.reject_reason = "cooldown"
             self._persist_signal(signal)
-            return None
+            return signal
 
         # ── NEW: Funding time avoidance ──────────────────────
         if self.cfg.avoid_funding_window and _is_near_funding_time(now, self.cfg.funding_window_minutes):
             signal.accepted = False
             signal.reject_reason = "funding_window"
             self._persist_signal(signal)
-            return None
+            return signal
 
         # ── NEW: Correlation filter ──────────────────────────
         if self.cfg.use_correlation_filter:
@@ -428,21 +499,21 @@ class Strategy:
                 signal.accepted = False
                 signal.reject_reason = "correlation_limit"
                 self._persist_signal(signal)
-                return None
+                return signal
 
         # Spread too wide
         if snap.spread_bps > self.cfg.max_spread_bps:
             signal.accepted = False
             signal.reject_reason = "spread_wide"
             self._persist_signal(signal)
-            return None
+            return signal
 
         # Depth too thin
         if min_depth < self.cfg.min_depth_usdt:
             signal.accepted = False
             signal.reject_reason = "depth_thin"
             self._persist_signal(signal)
-            return None
+            return signal
 
         # Funding rate filter
         if self.cfg.use_funding_filter and abs(snap.funding_rate) >= self.cfg.funding_rate_threshold:
@@ -450,12 +521,12 @@ class Strategy:
                 signal.accepted = False
                 signal.reject_reason = "high_funding_long"
                 self._persist_signal(signal)
-                return None
+                return signal
             if side == "SHORT" and snap.funding_rate < -self.cfg.funding_rate_threshold:
                 signal.accepted = False
                 signal.reject_reason = "high_funding_short"
                 self._persist_signal(signal)
-                return None
+                return signal
 
         # Regime filter (trend-follow / breakout)
         if self.cfg.use_regime_filter:
@@ -464,28 +535,28 @@ class Strategy:
                     signal.accepted = False
                     signal.reject_reason = "trend_follow_block"
                     self._persist_signal(signal)
-                    return None
+                    return signal
                 if indicators.trend_direction == "DOWN" and side != "SHORT":
                     signal.accepted = False
                     signal.reject_reason = "trend_follow_block"
                     self._persist_signal(signal)
-                    return None
+                    return signal
             elif mode == "BREAKOUT_WATCH":
                 if not breakout_confirmed:
                     signal.accepted = False
                     signal.reject_reason = "breakout_not_confirmed"
                     self._persist_signal(signal)
-                    return None
+                    return signal
                 if breakout_up and side != "LONG":
                     signal.accepted = False
                     signal.reject_reason = "breakout_mismatch"
                     self._persist_signal(signal)
-                    return None
+                    return signal
                 if breakout_down and side != "SHORT":
                     signal.accepted = False
                     signal.reject_reason = "breakout_mismatch"
                     self._persist_signal(signal)
-                    return None
+                    return signal
 
         # Higher TF trend alignment
         if self.cfg.require_higher_tf_alignment and indicators.higher_tf_trend != "NEUTRAL":
@@ -493,12 +564,12 @@ class Strategy:
                 signal.accepted = False
                 signal.reject_reason = "higher_tf_mismatch"
                 self._persist_signal(signal)
-                return None
+                return signal
             if side == "SHORT" and indicators.higher_tf_trend != "DOWN":
                 signal.accepted = False
                 signal.reject_reason = "higher_tf_mismatch"
                 self._persist_signal(signal)
-                return None
+                return signal
 
         # Trend filter: when we have exactly min confluence, don't trade against the trend
         if self.cfg.require_trend_not_against and confluence_score == effective_min_confluence:
@@ -507,12 +578,12 @@ class Strategy:
                 signal.accepted = False
                 signal.reject_reason = "trend_against"
                 self._persist_signal(signal)
-                return None
+                return signal
             if side == "SHORT" and trend == "UP":
                 signal.accepted = False
                 signal.reject_reason = "trend_against"
                 self._persist_signal(signal)
-                return None
+                return signal
 
         # Pullback mode: only trade WITH the trend
         if self.cfg.trade_with_trend_only:
@@ -521,19 +592,19 @@ class Strategy:
                 signal.accepted = False
                 signal.reject_reason = "trend_not_up"
                 self._persist_signal(signal)
-                return None
+                return signal
             if side == "SHORT" and trend not in ("DOWN", "NEUTRAL"):
                 signal.accepted = False
                 signal.reject_reason = "trend_not_down"
                 self._persist_signal(signal)
-                return None
+                return signal
 
         # Volume filter: skip very low volume (dead market)
         if self.cfg.min_volume_ratio > 0 and indicators.volume_ratio < self.cfg.min_volume_ratio:
             signal.accepted = False
             signal.reject_reason = "low_volume"
             self._persist_signal(signal)
-            return None
+            return signal
 
         # EMA-less entries must clear a stronger weighted-score floor.
         if (
@@ -545,7 +616,7 @@ class Strategy:
                 f"no_ema_score_{weighted_score:.0f}<{self.cfg.min_weighted_score_no_ema:.0f}"
             )
             self._persist_signal(signal)
-            return None
+            return signal
 
         # Momentum quality filter:
         # - EMA mode: enforce at minimum confluence
@@ -559,7 +630,7 @@ class Strategy:
             signal.accepted = False
             signal.reject_reason = "no_momentum_no_ema" if not require_ema else "no_momentum"
             self._persist_signal(signal)
-            return None
+            return signal
 
         # TIGHT/ULTRA: require minimum weighted score
         if risk_state == "TIGHT":
@@ -568,14 +639,14 @@ class Strategy:
                 signal.accepted = False
                 signal.reject_reason = f"tight_score_{weighted_score:.0f}<{min_score}"
                 self._persist_signal(signal)
-                return None
+                return signal
         elif risk_state == "ULTRA_TIGHT":
             min_score = getattr(self.cfg, "risk_ultra_min_weighted_score", 65.0)
             if weighted_score < min_score:
                 signal.accepted = False
                 signal.reject_reason = f"ultra_score_{weighted_score:.0f}<{min_score}"
                 self._persist_signal(signal)
-                return None
+                return signal
 
         # All checks passed
         signal.accepted = True
@@ -682,8 +753,34 @@ class Strategy:
             ))
 
         # 4. Bollinger Bands vote
+        #
+        # Detect the breakout FIRST. A band break confirmed by a volume spike
+        # invalidates the mean-reversion reading of the same bar: at BB% >= 0.98
+        # "price is at the upper band" (bollinger -> SHORT) and "price broke the
+        # upper band on volume" (breakout -> LONG) are the same observation read
+        # through opposite theories. They used to both fire, land in different
+        # clusters, and cancel each other where the intra-cluster consensus check
+        # could not see it. Measured on live data: ~15% of symbols at any moment.
         bb_pct = indicators.bollinger_pct
-        if bb_pct <= 0.15:
+        breakout_side = ""
+        if cfg.use_breakout_mode and indicators.volume_spike:
+            if bb_pct >= cfg.breakout_bb_pct_high:
+                breakout_side = "LONG"
+            elif bb_pct <= cfg.breakout_bb_pct_low:
+                breakout_side = "SHORT"
+
+        if breakout_side:
+            # Breakout owns this bar; the band is not a reversion level today.
+            votes.append(IndicatorVote(
+                name="bollinger", side="NEUTRAL", weight=0,
+                value=bb_pct, reason="suppressed: band break confirmed by volume",
+            ))
+            votes.append(IndicatorVote(
+                name="breakout", side=breakout_side, weight=cfg.weight_breakout,
+                value=bb_pct,
+                reason=f"BB breakout {'up' if breakout_side == 'LONG' else 'down'} + volume spike",
+            ))
+        elif bb_pct <= 0.15:
             votes.append(IndicatorVote(
                 name="bollinger", side="LONG", weight=cfg.weight_bollinger,
                 value=bb_pct, reason=f"BB%={bb_pct:.2f} (near lower band)",
@@ -709,18 +806,8 @@ class Strategy:
                 value=bb_pct, reason="mid range",
             ))
 
-        # 4b. Breakout vote (BB band break + volume spike)
-        if cfg.use_breakout_mode and indicators.volume_spike:
-            if bb_pct >= cfg.breakout_bb_pct_high:
-                votes.append(IndicatorVote(
-                    name="breakout", side="LONG", weight=cfg.weight_breakout,
-                    value=bb_pct, reason="BB breakout up + volume spike",
-                ))
-            elif bb_pct <= cfg.breakout_bb_pct_low:
-                votes.append(IndicatorVote(
-                    name="breakout", side="SHORT", weight=cfg.weight_breakout,
-                    value=bb_pct, reason="BB breakout down + volume spike",
-                ))
+        # (the breakout vote is emitted together with bollinger above, so the two
+        #  readings of the same bar can never contradict each other)
 
         # 5. Trend EMA vote
         td = indicators.trend_direction
@@ -1068,19 +1155,21 @@ class Strategy:
                             reason=f"price below POC by {indicators.price_vs_poc_bps:.0f}bps (revert to POC)",
                         ))
             elif not indicators.price_in_value_area:
-                # Outside value area → breakout or rejection
+                # Outside the value area this is a BREAKOUT read, not a reversion
+                # one. It is emitted under a separate name so it lands in the
+                # volatility cluster: the same indicator used to switch between
+                # "revert to POC" and "value area broke, follow it" while always
+                # counting as mean-reversion evidence.
                 if indicators.price_vs_poc_bps > 100:
-                    # Well above VA → strong breakout bullish
                     votes.append(IndicatorVote(
-                        name="volume_profile", side="LONG",
+                        name="volume_profile_break", side="LONG",
                         weight=cfg.weight_volume_profile,
                         value=indicators.price_vs_poc_bps,
                         reason=f"price broke above value area (+{indicators.price_vs_poc_bps:.0f}bps)",
                     ))
                 elif indicators.price_vs_poc_bps < -100:
-                    # Well below VA → strong breakout bearish
                     votes.append(IndicatorVote(
-                        name="volume_profile", side="SHORT",
+                        name="volume_profile_break", side="SHORT",
                         weight=cfg.weight_volume_profile,
                         value=indicators.price_vs_poc_bps,
                         reason=f"price broke below value area ({indicators.price_vs_poc_bps:.0f}bps)",
@@ -1189,6 +1278,48 @@ class Strategy:
 
         return cluster_votes, contrarian_bonus
 
+    def _resolve_by_thesis(
+        self, cluster_votes: list[ClusterVote],
+    ) -> tuple[str, int, float] | None:
+        """Decide direction from ONE cluster; everything else confirms or vetoes.
+
+        Returns ``(side, agreeing_cluster_count, agreeing_weight)`` or ``None``.
+
+        This replaces majority voting across clusters. Voting silently assumes
+        its voters estimate the same quantity, so averaging cancels their noise.
+        Mean reversion and trend following do not: they are different models of
+        price, and averaging them yields a direction that no component actually
+        holds. Worse, when the blend loses there is no way to tell WHICH model
+        was wrong, so nothing can be improved — which is exactly what happened.
+
+        Under this rule the primary thesis owns the direction. Other clusters can
+        only reduce the number of trades, never flip one, so a losing run is
+        attributable to a single, falsifiable claim about the market.
+        """
+        voting = [c for c in cluster_votes if c.name not in BONUS_ONLY_CLUSTERS]
+        thesis = next((c for c in voting if c.name == self.cfg.primary_thesis), None)
+
+        # No opinion from the thesis cluster means no trade — the other clusters
+        # are not allowed to invent a direction on their own.
+        if thesis is None or thesis.side == "NEUTRAL":
+            self._gate_stats["thesis_silent"] += 1
+            return None
+
+        side = thesis.side
+        others = [c for c in voting if c.name != thesis.name]
+        confirmations = [c for c in others if c.side == side]
+        vetoes = [c for c in others if c.side not in (side, "NEUTRAL")]
+
+        if len(confirmations) < self.cfg.thesis_min_confirmations:
+            self._gate_stats["too_few_confirmations"] += 1
+            return None
+        if len(vetoes) > self.cfg.thesis_max_vetoes:
+            self._gate_stats["vetoed"] += 1
+            return None
+
+        agreeing = [thesis, *confirmations]
+        return side, len(agreeing), sum(c.weight for c in agreeing)
+
     def _check_momentum(self, indicators: Indicators, side: str) -> bool:
         """Check if MACD momentum is building in the signal direction."""
         if not indicators.valid:
@@ -1235,6 +1366,7 @@ class Strategy:
         "whale":           "weight_whale",
         "liq_cascade":     "weight_liq_cascade",
         "volume_profile":  "weight_volume_profile",
+        "volume_profile_break": "weight_volume_profile",
         "sentiment":       "weight_sentiment",
     }
 
@@ -1248,26 +1380,40 @@ class Strategy:
     def _normalize_weighted_score(
         self, votes: list[IndicatorVote], side: str,
     ) -> tuple[float, float]:
-        """Normalize raw weighted score to 0-100 scale.
+        """Normalize the weighted score to a 0-100 agreement measure.
 
-        Returns (normalized_score, raw_score).
+        Returns (normalized_score, raw_winning_weight).
 
-        Normalization = (sum of winning-side weights) / (max possible for
-        those indicator names) × 100.
+            score = (winning weight - opposing weight) / max weight of every
+                    indicator that voted EITHER WAY  x 100
 
-        This way the score genuinely represents "what percentage of maximum
-        possible conviction did the winning indicators achieve?"
+        The denominator previously covered only the WINNING side, which made the
+        metric non-monotonic in the amount of evidence: a signal backed by two
+        full-weight indicators scored 81.8 while one backed by eight indicators
+        (three at partial weight) scored 77.7. Because leverage tiers and the
+        high-conviction margin multiplier keyed off this number, the bot put its
+        LARGEST positions and HIGHEST leverage behind its THINNEST evidence.
+
+        Counting opposing votes in both the numerator and the denominator makes
+        the score strictly decrease when a contradicting indicator appears, so it
+        now measures agreement quality rather than rewarding sparsity.
+
+        Breadth is enforced separately by ``min_cluster_confluence`` (how many
+        independent clusters must agree), which keeps the two concerns apart.
         """
+        opposite = "SHORT" if side == "LONG" else "LONG"
         side_votes = [v for v in votes if v.side == side]
+        opp_votes = [v for v in votes if v.side == opposite]
         if not side_votes:
             return 0.0, 0.0
 
-        raw = sum(v.weight for v in side_votes)
+        raw_win = sum(v.weight for v in side_votes)
+        raw_lose = sum(v.weight for v in opp_votes)
 
-        # Compute max possible for participating indicator names
+        # Max possible across every indicator that participated, either side.
         max_possible = 0.0
         seen: set[str] = set()
-        for v in side_votes:
+        for v in side_votes + opp_votes:
             if v.name in seen:
                 continue
             seen.add(v.name)
@@ -1281,10 +1427,10 @@ class Strategy:
                 max_possible += v.weight
 
         if max_possible <= 0:
-            return 0.0, raw
+            return 0.0, raw_win
 
-        normalized = (raw / max_possible) * 100.0
-        return min(normalized, 100.0), raw
+        normalized = ((raw_win - raw_lose) / max_possible) * 100.0
+        return max(0.0, min(normalized, 100.0)), raw_win
 
     def _compute_extremity_bonus(self, indicators: Indicators, side: str) -> float:
         """Bonus weight for extreme indicator values (higher conviction)."""
@@ -1338,8 +1484,23 @@ class Strategy:
         return elapsed_min < self.cfg.cooldown_minutes
 
     def _get_min_confluence(self, risk_state: str) -> int:
-        """How many indicators must agree."""
-        return self.cfg.min_confluence_score
+        """How many CLUSTERS must agree — the gate actually applied in
+        ``_evaluate_snapshot``.
+
+        This used to return ``min_confluence_score`` (an individual-indicator
+        count) while the evaluator read ``min_cluster_confluence`` directly, so
+        the value logged as "min_confluence" never matched the rule in force.
+
+        Risk states now RAISE the bar instead of leaving it flat: when the bot is
+        losing, it should demand more agreement, not the same amount.
+        """
+        voting_clusters = len(CLUSTER_MEMBERS) - len(BONUS_ONLY_CLUSTERS)
+        base = self.cfg.min_cluster_confluence
+        if risk_state == "TIGHT":
+            return min(base + 1, voting_clusters)
+        if risk_state == "ULTRA_TIGHT":
+            return min(base + 2, voting_clusters)
+        return base
 
     def _require_ema_for_mode(self, mode: str) -> bool:
         """Resolve EMA requirement with mode-aware overrides and legacy fallback."""
@@ -1407,18 +1568,27 @@ class Strategy:
 
             votes = self._compute_votes(snap)
             cluster_votes_swing, contra_bonus = self._compute_cluster_votes(votes)
-            long_clusters = [c for c in cluster_votes_swing if c.side == "LONG"]
-            short_clusters = [c for c in cluster_votes_swing if c.side == "SHORT"]
 
-            swing_min = cfg.swing_min_confluence
-            if len(long_clusters) >= swing_min and len(long_clusters) > len(short_clusters):
-                side = "LONG"
-                confluence = len(long_clusters)
-            elif len(short_clusters) >= swing_min and len(short_clusters) > len(long_clusters):
-                side = "SHORT"
-                confluence = len(short_clusters)
+            if cfg.signal_mode == "thesis":
+                # Same single-thesis rule as the scalp path. Left on majority
+                # voting, the swing leg would quietly reintroduce the very
+                # contradiction the scalp leg just removed.
+                resolved = self._resolve_by_thesis(cluster_votes_swing)
+                if resolved is None:
+                    continue
+                side, confluence, _agreeing_weight = resolved
             else:
-                continue
+                long_clusters = [c for c in cluster_votes_swing if c.side == "LONG"]
+                short_clusters = [c for c in cluster_votes_swing if c.side == "SHORT"]
+                swing_min = cfg.swing_min_confluence
+                if len(long_clusters) >= swing_min and len(long_clusters) > len(short_clusters):
+                    side = "LONG"
+                    confluence = len(long_clusters)
+                elif len(short_clusters) >= swing_min and len(short_clusters) > len(long_clusters):
+                    side = "SHORT"
+                    confluence = len(short_clusters)
+                else:
+                    continue
 
             # Normalize swing weighted score to 0-100
             weighted, _raw = self._normalize_weighted_score(votes, side)

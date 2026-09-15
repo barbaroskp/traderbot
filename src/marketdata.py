@@ -142,6 +142,33 @@ class EMAState:
     count: int = 0  # number of data points fed
 
 
+def finalize_klines(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sort ascending by time and DROP the still-forming last candle.
+
+    BingX returns the in-progress candle as the most recent entry. Including it
+    makes every indicator repaint: close and volume change on each poll, so RSI,
+    MACD, bollinger_pct, z-score and volume_spike all flicker inside a single
+    bar and entry timing becomes arbitrary. In particular
+    ``volume_ratio = volumes[-1] / avg_vol`` is structurally understated early in
+    a candle and only spikes near its close.
+
+    The backtest walks closed candles only, which is why backtest results never
+    transferred to live. Dropping the partial candle here makes the live signal
+    identical to the one the backtest evaluates.
+    """
+    if not raw:
+        return []
+
+    def _ts(k: dict[str, Any]) -> int:
+        try:
+            return int(k.get("time", k.get("t", 0)) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    ordered = sorted(raw, key=_ts)
+    return ordered[:-1] if len(ordered) > 1 else []
+
+
 def _detect_liquidation_cascade(ind: "Indicators") -> None:
     """Detect liquidation cascades from OI change + price velocity.
 
@@ -361,9 +388,9 @@ class MarketData:
     # ── Kline + Indicators ─────────────────────────────────────
 
     async def fetch_klines(self, symbol: str) -> list[dict[str, Any]]:
-        """Fetch kline/candlestick data."""
+        """Fetch kline data. Returns CLOSED candles only (see finalize_klines)."""
         try:
-            return await self.client.get_klines(
+            raw = await self.client.get_klines(
                 symbol,
                 interval=self.cfg.kline_interval,
                 limit=self.cfg.kline_limit,
@@ -371,23 +398,61 @@ class MarketData:
         except BingXClientError as exc:
             log.warning("kline fetch failed", extra={"symbol": symbol, "error": str(exc)})
             return []
+        return finalize_klines(raw)
 
     async def fetch_klines_custom(
         self, symbol: str, interval: str, limit: int
     ) -> list[dict[str, Any]]:
-        """Fetch klines with custom interval/limit (for swing trading)."""
+        """Fetch klines with custom interval/limit (for swing trading). Closed candles only."""
         try:
-            return await self.client.get_klines(symbol, interval=interval, limit=limit)
+            raw = await self.client.get_klines(symbol, interval=interval, limit=limit)
         except BingXClientError as exc:
             log.warning("custom kline fetch failed", extra={
                 "symbol": symbol, "interval": interval, "error": str(exc),
             })
             return []
+        return finalize_klines(raw)
+
+    async def fetch_recent_extremes(
+        self, symbol: str, interval: str = "1m", limit: int = 10
+    ) -> tuple[float, float]:
+        """Highest high / lowest low over the last ``limit`` candles.
+
+        Deliberately INCLUDES the in-progress candle: this is used to decide
+        whether a stop or target was touched, not to compute an indicator.
+
+        Paper mode used to compare only the latest mark price against SL/TP.
+        Any excursion that reverted between two polls was therefore invisible,
+        while on the exchange the resting stop would already have filled. That
+        made paper results systematically kinder than live — losing trades were
+        quietly allowed to continue. Returns (0.0, 0.0) when unavailable.
+        """
+        try:
+            raw = await self.client.get_klines(symbol, interval=interval, limit=limit)
+        except BingXClientError as exc:
+            log.debug("recent extremes fetch failed", extra={"symbol": symbol, "error": str(exc)})
+            return 0.0, 0.0
+
+        highs: list[float] = []
+        lows: list[float] = []
+        for k in raw:
+            try:
+                h = float(k.get("high", k.get("h", 0)))
+                low = float(k.get("low", k.get("l", 0)))
+            except (TypeError, ValueError):
+                continue
+            if h > 0:
+                highs.append(h)
+            if low > 0:
+                lows.append(low)
+        if not highs or not lows:
+            return 0.0, 0.0
+        return max(highs), min(lows)
 
     async def fetch_klines_higher_tf(self, symbol: str) -> list[dict[str, Any]]:
-        """Fetch higher-timeframe kline data for trend confirmation."""
+        """Fetch higher-timeframe kline data for trend confirmation. Closed candles only."""
         try:
-            return await self.client.get_klines(
+            raw = await self.client.get_klines(
                 symbol,
                 interval=self.cfg.higher_tf_interval,
                 limit=self.cfg.higher_tf_limit,
@@ -395,6 +460,7 @@ class MarketData:
         except BingXClientError as exc:
             log.warning("higher-tf kline fetch failed", extra={"symbol": symbol, "error": str(exc)})
             return []
+        return finalize_klines(raw)
 
     def compute_indicators(self, klines: list[dict[str, Any]]) -> Indicators:
         """Compute RSI, MACD, Bollinger Bands, trend EMA from kline data.

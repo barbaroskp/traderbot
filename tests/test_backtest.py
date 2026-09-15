@@ -255,10 +255,18 @@ class TestBacktestEngine:
         engine._close_position(pos, exit_price=101.0, reason="TP", ts=datetime.now(timezone.utc))
         trade = engine._trades[0]
 
-        # PnL = (101 - 100) * 1 - fee
-        # Fee = 101 * 1 * 0.0004 = 0.0404
-        expected_pnl = 1.0 - 0.0404
-        assert trade.pnl == pytest.approx(expected_pnl, abs=0.01)
+        # The exit now pays slippage as well as the fee: a stop-market or
+        # take-profit-market order crosses the book instead of filling exactly at
+        # the level. Funding is ~0 here because the hold is ~0 minutes.
+        slip = bt_cfg.slippage_assumption_bps / 10_000
+        fill_exit = 101.0 * (1 - slip)          # LONG closes by selling
+        gross = (fill_exit - 100.0) * 1.0
+        fee = fill_exit * 1.0 * (bt_cfg.fee_rate_bps / 10_000)
+        expected_pnl = gross - fee
+
+        assert trade.pnl == pytest.approx(expected_pnl, abs=1e-6)
+        # And it must be strictly worse than the old fee-only model.
+        assert trade.pnl < 1.0 - fee
 
     def test_build_report_empty(self, bt_cfg: Settings) -> None:
         """Report works with no trades."""

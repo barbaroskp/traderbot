@@ -7,6 +7,18 @@ build/
 .env
 data/*.db
 data/*.log
+
+# macOS
+.DS_Store
+
+# Cached market data. The research scripts download hundreds of megabytes of
+# klines and re-download on demand, so the caches are reproducible artefacts
+# rather than source. Committing them would add ~150 MB to every clone for no
+# benefit, and would silently pin a snapshot of vendor data that the fetchers
+# are supposed to refresh.
+*.pkl
+research/**/data/
+data/*.json
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
